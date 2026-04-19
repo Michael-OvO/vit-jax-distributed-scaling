@@ -71,8 +71,12 @@ def run_straggler_experiment(config: StragglerConfig) -> dict:
     # Effective batch size.
     effective_batch_size = (config.batch_size // num_devices) * num_devices
 
-    # Delay values to test.
-    delay_values = config.delay_values or [100, 500, 1000, 5000, 10000]
+    # Delay values to test. Calibrated for TPU v6e (~918 TFLOPs bf16) using
+    # 512x512 matmul body in create_train_step_with_straggler — the old
+    # values [100 ... 10000] produce microsecond-scale delays on modern
+    # hardware and show up as noise. Scaled range below spans from a ~1 ms
+    # injection (visible in p50) up to ~60 ms (~2x slowdown).
+    delay_values = config.delay_values or [5000, 20000, 50000, 100000, 200000]
 
     # --- Setup shared resources ---
     rng = jax.random.PRNGKey(config.seed)

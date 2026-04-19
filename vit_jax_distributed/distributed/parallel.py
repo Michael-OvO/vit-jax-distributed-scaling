@@ -68,16 +68,30 @@ def create_train_step(devices=None):
 
 
 def create_train_step_with_straggler(delay_iterations=1000, devices=None):
-    """Return a pmap'd training step that injects artificial delay on device 0.
+    """Return a pmap'd training step that injects real compute delay on device 0.
 
-    On device index 0, a dummy fori_loop runs ``delay_iterations`` extra
-    matrix multiplications to simulate a straggler worker. Because pmap
-    synchronises at the all-reduce barrier, the straggler forces every
-    device to wait — demonstrating the bottleneck of synchronous data
-    parallelism.
+    On device index 0, a ``fori_loop`` executes ``delay_iterations`` nonlinear
+    matrix operations that XLA cannot algebraically elide. Because pmap
+    synchronises at the all-reduce barrier, device 0's extra work forces every
+    other device to wait — this is the signature of synchronous-SGD's worst case.
+
+    Design choices, all necessary on modern accelerators (v6e, H100):
+
+    * **Nonlinear body.** ``tanh(a @ a) * 0.99 + 0.01 * a`` — each iteration
+      truly depends on the previous, and the nonlinearity blocks the
+      algebraic-simplification pass. The earlier ``a @ eye(64) + 0*a`` was
+      folded to the identity map.
+    * **Matrix size 512.** ``64 x 64`` was ~0.5 MFLOPs/iter; on a v6e this is
+      ~5 nanoseconds and gets lost in noise. ``512 x 512`` is ~268 MFLOPs
+      (~3 microseconds), so even moderate ``delay_iterations`` produce
+      millisecond-scale delays visible against a ~50 ms step.
+    * **Keep-alive via optimization_barrier.** The loop output is threaded
+      into ``loss`` with a ``1e-30`` coupling. The coefficient is numerically
+      negligible (below any training-relevant epsilon) but not an exact-zero
+      identity, so XLA's DCE cannot prune the ``fori_loop``.
 
     Args:
-        delay_iterations: Number of dummy matmul iterations on device 0.
+        delay_iterations: Trip count of the delay loop on device 0.
         devices: Optional explicit device list; see :func:`create_train_step`.
     """
 
@@ -97,20 +111,30 @@ def create_train_step_with_straggler(delay_iterations=1000, devices=None):
 
         new_state = state.apply_gradients(grads=grads)
 
-        # Inject artificial delay on device 0 via extra compute that XLA
-        # cannot elide (each iteration depends on the previous result).
+        # ---- Straggler injection on device 0 ----------------------------
         device_idx = jax.lax.axis_index("batch")
+        side = 512
 
-        def _straggler_delay(dummy):
-            def body_fn(i, acc):
-                return acc @ jnp.eye(64) + 0.0 * acc
-            return jax.lax.fori_loop(0, delay_iterations, body_fn, dummy)
+        def _straggler(acc):
+            def body(i, a):
+                return jnp.tanh(a @ a) * 0.99 + 0.01 * a
+            return jax.lax.fori_loop(0, delay_iterations, body, acc)
 
-        def _no_delay(dummy):
-            return dummy
+        def _no_delay(acc):
+            return acc
 
-        dummy = jnp.ones((64, 64))
-        _ = jax.lax.cond(device_idx == 0, _straggler_delay, _no_delay, dummy)
+        # Non-uniform initialiser so early iterations do real work
+        # (a @ a of a constant tensor would still get folded).
+        anchor = jnp.linspace(-1.0, 1.0, side * side,
+                              dtype=jnp.float32).reshape(side, side)
+        delay_out = jax.lax.cond(device_idx == 0, _straggler, _no_delay, anchor)
+
+        # Keep the fori_loop alive through XLA's DCE. The optimization_barrier
+        # prevents reasoning across the line; the 1e-30 coupling is
+        # numerically inert but not an exact-zero identity.
+        loss, delay_sum = jax.lax.optimization_barrier(
+            (loss, jnp.sum(delay_out)))
+        loss = loss + 1e-30 * delay_sum
 
         metrics = {"loss": loss, "accuracy": accuracy}
         return new_state, metrics
