@@ -178,10 +178,15 @@ def create_train_state(
     variables = model.init(rng, dummy_input, train=False)
     params = variables["params"]
 
+    # Optax subtracts warmup from decay_steps internally; clamp so short runs
+    # (e.g. 2-epoch smoke tests with fewer total steps than the default 500
+    # warmup) don't hit ValueError on a negative decay horizon.
+    effective_warmup = min(warmup_steps, max(1, total_steps // 2))
+
     schedule = optax.warmup_cosine_decay_schedule(
         init_value=0.0,
         peak_value=learning_rate,
-        warmup_steps=warmup_steps,
+        warmup_steps=effective_warmup,
         decay_steps=total_steps,
         end_value=0.0,
     )
