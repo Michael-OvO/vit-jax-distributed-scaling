@@ -26,6 +26,15 @@ tensorflow_datasets/
 # Claude Code / agent runtime state
 .claude/
 
+# LaTeX build artefacts (keep .tex, ignore build output)
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
 # OS
 .DS_Store
 Thumbs.db

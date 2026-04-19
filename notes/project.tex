@@ -1,0 +1,594 @@
+\documentclass[11pt,a4paper]{article}
+
+% ------- Packages ---------------------------------------------------------
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue!60!black,urlcolor=blue!60!black,citecolor=blue!60!black}
+
+% ------- Code listing style ----------------------------------------------
+\definecolor{codebg}{RGB}{248,248,248}
+\definecolor{keyword}{RGB}{0,102,153}
+\definecolor{string}{RGB}{170,55,55}
+\definecolor{comment}{RGB}{100,100,100}
+
+\lstdefinestyle{py}{
+    language=Python,
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{keyword}\bfseries,
+    stringstyle=\color{string},
+    commentstyle=\color{comment}\itshape,
+    showstringspaces=false,
+    breaklines=true,
+    frame=single,
+    framesep=4pt,
+    xleftmargin=0pt,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    numbersep=8pt,
+    tabsize=4
+}
+\lstset{style=py}
+
+\lstdefinestyle{sh}{
+    language=bash,
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{keyword},
+    commentstyle=\color{comment}\itshape,
+    showstringspaces=false,
+    breaklines=true,
+    frame=single,
+    framesep=4pt,
+    xleftmargin=0pt
+}
+
+% ------- Title ------------------------------------------------------------
+\title{\textbf{ViT-JAX Distributed Scaling}\\
+       \large Study notes on data-parallel Vision Transformer training on TPU}
+\author{Project notes}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent This document is a study-notes writeup of the \texttt{vit-jax-distributed-scaling}
+project: we train a Vision Transformer (ViT-Small) on CIFAR-100 using JAX/Flax, parallelised
+with \texttt{jax.pmap}, and use the setup to probe two systems questions:
+(i) \emph{how does throughput scale with device count?} and
+(ii) \emph{how badly does a single slow worker hurt synchronous training?}
+Every section pairs the conceptual intuition with the minimal piece of code that implements
+it, so the document doubles as a guided reading of the repository.
+\end{abstract}
+
+\tableofcontents
+\vspace{1em}
+\hrule
+\vspace{1em}
+
+% =========================================================================
+\section{What we built, and why}
+% =========================================================================
+
+A Vision Transformer trains by (a) splitting an image into patches,
+(b) treating the patches as a token sequence, and (c) feeding that sequence through a stack of
+transformer blocks. Training one is cheap; training one \emph{at scale, across accelerators}
+exposes two systems phenomena that matter far beyond ViT:
+
+\begin{itemize}
+\item The \textbf{all-reduce barrier}: every device must reach the gradient-average step before any
+      can proceed. This is the single most important synchronisation primitive in data-parallel
+      training, and it is what makes distributed training brittle to slow workers.
+\item \textbf{Scaling efficiency}: doubling the devices never exactly doubles throughput because
+      gradients have to travel over an interconnect. Measuring how much you lose is how you tell
+      whether your distributed strategy is working.
+\end{itemize}
+
+We use ViT-Small on CIFAR-100 because the model is small enough ($\sim$10M parameters) that
+per-step work is short, so the all-reduce and straggler effects dominate the signal we want to
+measure. On a bigger model the compute would hide everything.
+
+\subsection{Repo layout}
+
+\begin{lstlisting}[style=sh]
+vit_jax_distributed/
+  models/vit.py             # ViT-Small (Flax Linen)
+  data/cifar100.py          # TFDS -> numpy in-memory pipeline
+  distributed/parallel.py   # pmap, pmean, train state
+  train/trainer.py          # training loop
+  experiments/
+    scaling.py              # throughput vs device count
+    straggler.py            # step time with a slow worker
+  utils/                    # config, logging, timing
+main.py                     # CLI entry point
+scripts/setup.sh            # installs jax[tpu|cuda|cpu] per host
+scripts/run_gcp_tpu.sh      # end-to-end TPU run
+\end{lstlisting}
+
+\subsection{Smoke-test result (the numbers we are going to explain)}
+
+On an 8-chip TPU v6e spot VM, a two-epoch run produced:
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+Model parameters               & 9{,}554{,}404 \\
+Global batch size              & 512 \\
+Per-device batch size          & 64  \\
+Steady-state step time         & 32.8 ms (p50) \\
+First step (XLA compile)       & $\sim$65 s \\
+Post-compile throughput        & $\sim$15{,}600 images/sec \\
+Test accuracy after 2 epochs   & 22.0\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The 65-second first step is not a bug; it is XLA tracing and compiling the pmap'd training
+step into a TPU executable. Every subsequent step re-uses that compiled graph, which is why
+they are $\sim$2000$\times$ faster.
+
+% =========================================================================
+\section{The model: ViT-Small}
+% =========================================================================
+
+\subsection{Intuition: images as sequences}
+
+Transformers are sequence models. To feed them an image we turn the image into a sequence:
+
+\begin{enumerate}
+\item Tile the $32 \times 32$ image into non-overlapping $4 \times 4$ patches, yielding 64 patches.
+\item Flatten each patch and project it through a learnable linear layer to get a 384-dim token.
+\item Prepend a learnable \texttt{[CLS]} token (so we have 65 tokens total).
+\item Add learnable positional embeddings (the model cannot recover spatial position otherwise).
+\end{enumerate}
+
+The output of this preprocessing is a tensor of shape $(B, 65, 384)$: a batch of 65-token
+sequences, each token a 384-dim embedding. From here on it is pure Transformer encoder.
+
+\subsection{Pre-norm blocks}
+
+Each transformer block is:
+$$
+x' = x + \text{Attn}(\text{LN}(x)), \qquad x'' = x' + \text{MLP}(\text{LN}(x'))
+$$
+
+Applying LayerNorm \emph{before} attention and MLP (``pre-norm'') is the standard choice in modern
+ViT and GPT-style models: it stabilises training at depth because the residual stream stays at
+unit scale regardless of how many layers you stack.
+
+\subsection{Classification head}
+
+After $N$ transformer blocks and a final LayerNorm, we read out the \texttt{[CLS]} token only
+(\texttt{x[:, 0]}) and feed it through a linear layer to 100 logits. The intuition: the
+self-attention has, over $N$ rounds, aggregated information from every patch \emph{into} the CLS
+token, so it is a learned summary of the whole image.
+
+\subsection{Code: patch embedding}
+
+\begin{lstlisting}[style=py]
+class PatchEmbedding(nn.Module):
+    hidden_dim: int = 384
+    patch_size: int = 4
+    image_size: int = 32
+
+    @nn.compact
+    def __call__(self, x):
+        B = x.shape[0]
+        N = (self.image_size // self.patch_size) ** 2    # 64 patches
+        # (B, H, W, C) -> (B, N, patch_size*patch_size*C) -> (B, N, hidden_dim)
+        x = nn.Dense(self.hidden_dim, name="patch_projection")(
+            x.reshape(B, self.image_size // self.patch_size, self.patch_size,
+                         self.image_size // self.patch_size, self.patch_size, -1)
+             .transpose(0, 1, 3, 2, 4, 5)
+             .reshape(B, N, -1))
+        cls = self.param("cls_token",    nn.initializers.normal(0.02), (1, 1, self.hidden_dim))
+        pos = self.param("pos_embedding", nn.initializers.normal(0.02), (1, N + 1, self.hidden_dim))
+        x   = jnp.concatenate([jnp.broadcast_to(cls, (B, 1, self.hidden_dim)), x], axis=1)
+        return x + pos
+\end{lstlisting}
+
+Full architecture (\texttt{vit\_jax\_distributed/models/vit.py}): 8 transformer blocks, hidden
+384, 6 heads, MLP dim 768, $\sim$9.5M parameters. Standard ViT-Small-for-CIFAR.
+
+% =========================================================================
+\section{Data pipeline}
+% =========================================================================
+
+CIFAR-100 is 50{,}000 training images, $32 \times 32 \times 3$ each. Standardised and stored as
+float32 that is $50000 \cdot 32 \cdot 32 \cdot 3 \cdot 4 \approx 614$ MB. The full dataset fits
+comfortably in RAM, so we skip \texttt{tf.data} entirely and use a plain numpy iterator:
+
+\begin{lstlisting}[style=py]
+def _numpy_data_iterator(images, labels, batch_size, shuffle, augment, loop, seed):
+    n     = images.shape[0]
+    usable = (n // batch_size) * batch_size          # drop the ragged tail
+    rng    = np.random.RandomState(seed)
+    while True:
+        idx = np.arange(n)
+        if shuffle: rng.shuffle(idx)
+        idx = idx[:usable]
+        for s in range(0, usable, batch_size):
+            batch_idx  = idx[s : s + batch_size]
+            batch_imgs = images[batch_idx].copy()
+            if augment:
+                batch_imgs = _augment_batch(batch_imgs, rng)
+            yield {"image": batch_imgs, "label": labels[batch_idx]}
+        if not loop: break
+\end{lstlisting}
+
+\textbf{Augmentation.} Random horizontal flip and random crop with 4-pixel reflection padding.
+Both are vectorised with advanced indexing over the whole batch; no per-image Python loop.
+
+\subsection{Sharding for pmap}
+
+Every distributed step needs each device's private slice of the batch. We reshape
+$(B, H, W, C) \to (\text{num\_devices}, B/\text{num\_devices}, H, W, C)$ and let pmap dispatch
+slice $i$ to device $i$:
+
+\begin{lstlisting}[style=py]
+def shard_batch(batch, num_devices):
+    def reshape(x):
+        per_device = x.shape[0] // num_devices
+        return x.reshape((num_devices, per_device) + x.shape[1:])
+    return {k: reshape(v) for k, v in batch.items()}
+\end{lstlisting}
+
+A global batch of 512 across 8 devices means each device sees 64 images per step.
+
+% =========================================================================
+\section{Distributed training: the conceptual heart}
+% =========================================================================
+
+\subsection{SPMD and pmap}
+
+JAX's \texttt{jax.pmap} is a SPMD (``Single Program, Multiple Data'') primitive. You write one
+function; pmap arranges for it to run on every device simultaneously, each device receiving its
+own slice of the input.
+
+\begin{lstlisting}[style=py]
+@partial(jax.pmap, axis_name="batch", devices=devices)
+def train_step(state, batch, rng):
+    ...
+\end{lstlisting}
+
+Two things worth internalising:
+\begin{itemize}
+\item Inputs to a pmap'd function must have a leading dimension of size \texttt{len(devices)};
+      pmap strips this dimension and gives device $i$ the $i$-th slice.
+\item Outputs \emph{keep} a leading device dimension. To read a scalar loss on the host you
+      usually index \texttt{loss[0]} --- because loss was \texttt{pmean}'d across devices, every
+      device holds the same value.
+\end{itemize}
+
+\subsection{All-reduce via pmean}
+
+The magic happens inside the step: after each device has computed its local gradients from its
+slice of the batch, we \emph{average} those gradients across every device. That averaging is the
+\textbf{all-reduce} operation, and it is what makes the whole thing mathematically equivalent to
+training on one device with the full global batch.
+
+\begin{lstlisting}[style=py]
+grads = jax.lax.pmean(grads, axis_name="batch")   # <-- the all-reduce
+loss  = jax.lax.pmean(loss,  axis_name="batch")
+acc   = jax.lax.pmean(acc,   axis_name="batch")
+new_state = state.apply_gradients(grads=grads)
+\end{lstlisting}
+
+The name \texttt{"batch"} is arbitrary; it names the pmap axis. You can have nested pmaps with
+different axis names (``batch'' for data parallel, ``model'' for tensor parallel) --- not used in
+this project, but the pattern generalises.
+
+\subsection{Why this matters: the barrier}
+
+All-reduce is a \textbf{collective} operation: it cannot complete on any single device until
+every device has contributed its gradient. Every training step therefore has an implicit barrier
+where slow workers hold up fast ones. Schematically:
+
+\begin{lstlisting}[style=sh]
+Device 0: forward -> backward -> [pmean] -> optimizer step
+Device 1: forward -> backward -> [pmean] -> optimizer step
+Device 2: forward -> backward -> [pmean] -> optimizer step
+Device 3: forward -> backward -> [pmean] -> optimizer step
+                                    ^
+                           all-reduce barrier:
+                           nobody moves until everybody arrives
+\end{lstlisting}
+
+This is the phenomenon the \textbf{straggler experiment} isolates.
+
+\subsection{Train state and replication}
+
+Flax's \texttt{TrainState} bundles model apply function + parameters + optimizer state. We
+create one master copy, then replicate it across every device with \texttt{flax.jax\_utils.replicate},
+which prepends a device axis of size \texttt{len(devices)}:
+
+\begin{lstlisting}[style=py]
+def create_train_state(rng, model, lr, image_size, weight_decay, warmup_steps, total_steps):
+    dummy  = jnp.ones([1, image_size, image_size, 3])
+    params = model.init(rng, dummy, train=False)["params"]
+
+    effective_warmup = min(warmup_steps, max(1, total_steps // 2))
+    schedule = optax.warmup_cosine_decay_schedule(
+        init_value=0.0, peak_value=lr,
+        warmup_steps=effective_warmup, decay_steps=total_steps, end_value=0.0)
+    tx = optax.adamw(learning_rate=schedule, weight_decay=weight_decay)
+    return TrainState.create(apply_fn=model.apply, params=params, tx=tx)
+
+state = replicate_state(state, devices=devices)     # <- broadcast to all devices
+\end{lstlisting}
+
+The clamp on \texttt{effective\_warmup} exists because \texttt{optax.warmup\_cosine\_decay\_schedule}
+internally computes \texttt{decay\_steps - warmup\_steps} and errors out on a negative result ---
+which is exactly what happens when you run a two-epoch smoke test with the default 500-step
+warmup. Clamping to $\text{total\_steps}/2$ keeps the long-run behaviour unchanged while making
+short runs legal.
+
+% =========================================================================
+\section{Putting it together: the training loop}
+% =========================================================================
+
+\begin{lstlisting}[style=py]
+state        = replicate_state(state, devices=devices)
+p_train_step = create_train_step(devices=devices)
+p_eval_step  = create_eval_step(devices=devices)
+train_iter, _ = get_datasets(config, num_devices=num_devices, seed=seed)
+
+for epoch in range(config.epochs):
+    for step in range(steps_per_epoch):
+        batch        = next(train_iter)
+        batch        = shard_batch(batch, num_devices)    # (N, B/N, ...)
+        rng, step_rng = jax.random.split(rng)
+        step_rngs    = jax.random.split(step_rng, num_devices)
+
+        state, metrics = p_train_step(state, batch, step_rngs)
+
+        step_loss = float(metrics["loss"][0])    # implicit host barrier
+        step_acc  = float(metrics["accuracy"][0])
+
+    # end of epoch: evaluate
+    test_metrics = _run_evaluation(state, p_eval_step, config, num_devices)
+\end{lstlisting}
+
+Four things worth noticing:
+
+\begin{enumerate}
+\item \textbf{One RNG per device.} \texttt{jax.random.split(step\_rng, num\_devices)} gives each
+      device its own dropout stream. Without this, every device would apply identical dropout,
+      reducing regularisation strength.
+\item \textbf{Asynchronous dispatch.} \texttt{p\_train\_step} returns immediately with lazy
+      arrays; the compute runs on TPU in the background. The \texttt{float(metrics["loss"][0])}
+      call is what blocks the host until the step is actually done --- this is our implicit
+      barrier for timing.
+\item \textbf{Metrics are pmean'd inside the pmap}, so \texttt{metrics["loss"]} has shape
+      \texttt{(num\_devices,)} and every entry is equal. Indexing \texttt{[0]} just picks any one.
+\item \textbf{Per-step batch sharding.} Sharding is a host-side numpy reshape, not a TPU op, so
+      it is practically free compared to the $\sim$33 ms step itself.
+\end{enumerate}
+
+% =========================================================================
+\section{Experiments}
+% =========================================================================
+
+\subsection{Scaling experiment}
+
+\subsubsection*{What we are measuring}
+
+For $k \in \{1, 2, 4, 8\}$ we measure:
+\begin{itemize}
+\item \textbf{Step time} $T_k$: median wall-clock time to execute one forward-backward-update
+      cycle on $k$ devices with per-device batch size held constant, so the global batch grows
+      with $k$.
+\item \textbf{Throughput} $\Theta_k = B_k / T_k$ images per second, where $B_k = k \cdot B_1$.
+\item \textbf{Scaling efficiency} $\eta_k = \Theta_k / (k \cdot \Theta_1)$. Perfect scaling is
+      $\eta = 1$.
+\end{itemize}
+
+\subsubsection*{What to expect, and why}
+
+Gradient averaging requires sending parameter-sized tensors between devices. Total all-reduce
+bandwidth is fixed, so as $k$ grows the constant communication cost takes a larger \emph{relative}
+bite out of step time. Concretely, if per-step compute is $C$ and all-reduce is $R$,
+$$
+T_k \approx C + R, \qquad \eta_k \approx \frac{C}{C + R}
+$$
+(ignoring topology, overlap, and the fact that $R$ itself grows with $k$). For our tiny model
+$C \sim 30$ ms and $R$ is small on a TPU v6e mesh, so we expect $\eta \gtrsim 0.85$ at $k=8$.
+
+\subsubsection*{Measurement hygiene}
+
+\begin{itemize}
+\item \textbf{Warmup.} The first step compiles via XLA ($\sim$65 s on v6e-8). We run 10 warmup
+      steps before we start timing.
+\item \textbf{Explicit block.} We call \texttt{jax.tree.map(lambda x: x.block\_until\_ready(), state)}
+      after each timed step, so the tick captures actual device work and not just dispatch latency.
+\item \textbf{Device subset.} To benchmark a strict subset of devices, we forward
+      \texttt{devices=all\_devices[:k]} into \emph{both} \texttt{jax.pmap} \emph{and}
+      \texttt{flax.jax\_utils.replicate}. Forgetting either leaves pmap defaulting to all local
+      devices, and the sharded batch's leading dimension then mismatches.
+\end{itemize}
+
+\subsection{Straggler experiment}
+
+\subsubsection*{The question}
+
+A synchronous data-parallel system only advances as fast as its slowest worker. How much does a
+single slow device hurt total throughput?
+
+\subsubsection*{Injecting a real straggler}
+
+Naive \texttt{time.sleep(x)} is useless here: it is a Python call, and Python does not run
+\emph{inside} a pmap'd, JIT-compiled XLA program. Even if it did, an intelligent scheduler
+might just reorder around it. We need a delay XLA cannot elide, which means real compute with a
+real data dependency on itself:
+
+\begin{lstlisting}[style=py]
+device_idx = jax.lax.axis_index("batch")          # 0..num_devices-1
+
+def _straggler(acc):
+    def body(i, a): return a @ jnp.eye(64) + 0.0 * a
+    return jax.lax.fori_loop(0, delay_iterations, body, acc)
+
+def _no_delay(acc): return acc
+
+dummy = jnp.ones((64, 64))
+_ = jax.lax.cond(device_idx == 0, _straggler, _no_delay, dummy)
+\end{lstlisting}
+
+Each loop iteration multiplies a $64 \times 64$ matrix by the identity and adds
+$0 \cdot a$: the data dependency on the previous iteration's \texttt{acc} stops the compiler
+from constant-folding or hoisting the loop, and the \texttt{lax.cond} on
+\texttt{axis\_index("batch") == 0} confines the work to one device.
+
+\subsubsection*{What to expect}
+
+For baseline step time $T$ and injected extra time $\Delta$ on one device,
+$$
+T_{\text{straggler}} \approx T + \Delta, \qquad
+\text{slowdown} = \frac{T_{\text{straggler}}}{T} \approx 1 + \frac{\Delta}{T}.
+$$
+In other words: \emph{every} device pays the straggler tax even though only one device is slow.
+A single bad worker in a 1000-GPU cluster makes the other 999 wait.
+
+The experiment sweeps \texttt{delay\_iterations} $\in \{100, 500, 1000, 5000, 10000\}$ and
+reports the ratio of straggler step time to baseline step time. The curve on log-$x$ axis should
+be roughly linear once $\Delta$ is large enough to dominate $T$.
+
+\subsubsection*{Why this matters in production}
+
+Real clusters have real stragglers: thermal throttling, bad NICs, GC pauses, a noisy neighbour
+on a shared node. The straggler experiment is a miniature of why techniques like
+asynchronous SGD, elastic averaging, hedged requests, and backup workers exist.
+
+% =========================================================================
+\section{TPU-specific notes}
+% =========================================================================
+
+\subsection{Why JAX installs differently on TPU}
+
+TPU does not speak CUDA; it speaks over \texttt{libtpu}, a Google-provided shared library that
+plugs into JAX via a plugin. You \textbf{cannot} \texttt{pip install jax[cuda12]} on a TPU VM ---
+JAX will import successfully but fall back to CPU, silently, and your training will be
+$\sim$50$\times$ slower with no error. The correct install command is:
+
+\begin{lstlisting}[style=sh]
+pip install -U "jax[tpu]>=0.4.20" \
+    -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+\end{lstlisting}
+
+\texttt{scripts/setup.sh} detects TPU hosts by checking \texttt{/dev/accel*} and the
+\texttt{TPU\_NAME} env var --- deliberately \emph{before} JAX is installed, so it can choose the
+right wheel on a fresh VM.
+
+\subsection{bf16 on the MXU}
+
+TPU v3 and v6e compute matmuls natively in bf16 (brain-float: 1 sign bit, 8 exponent bits,
+7 mantissa bits). Enabling bf16 for matmuls while keeping fp32 parameters is a one-liner:
+
+\begin{lstlisting}[style=py]
+jax.config.update("jax_default_matmul_precision", "bfloat16")
+\end{lstlisting}
+
+This is what our \texttt{--precision bf16} flag does. It does \emph{not} change parameter dtype
+or optimizer state; it only tells XLA that every matmul (dense layers, attention QKV, einsum
+inside convolutions) can run the MXU in bf16 mode. On v6e this is typically a $1.5$--$2\times$
+throughput win for essentially free --- the narrower matmul precision is absorbed by the
+fp32 accumulator and the larger numbers that dominate training.
+
+\subsection{pmap vs pjit}
+
+This project uses \texttt{pmap} exclusively, because we only ever do \emph{pure data
+parallelism}: the same model on every device. \texttt{pjit} (and its successor
+\texttt{shard\_map}) is the right tool when you need \emph{tensor parallelism} (a single layer
+split across devices) or \emph{pipeline parallelism}. Our ViT-Small fits in one TPU chip's
+HBM, so model parallelism would be gratuitous.
+
+\subsection{Spot/preemption}
+
+v6e-8 spot VMs cost roughly one third of on-demand (\$1.26/hr vs \$4.21/hr as of this writing)
+but can be \emph{preempted} at any time: GCP reclaims the hardware, the VM transitions to
+\texttt{PREEMPTED}, and your process is gone. This hit us during initial setup, once. Mitigation
+in practice: either use on-demand for long runs, or use \texttt{gcloud alpha compute tpus
+queued-resources} to auto-retry until capacity returns.
+
+% =========================================================================
+\section{Running it}
+% =========================================================================
+
+Local laptop (CPU) or single GPU:
+\begin{lstlisting}[style=sh]
+bash scripts/setup.sh                    # detects hardware, installs jax build
+python main.py --experiment train --batch_size 128 --epochs 2
+\end{lstlisting}
+
+GCP TPU v6e-8:
+\begin{lstlisting}[style=sh]
+gcloud compute tpus tpu-vm create vit-training \
+    --zone=us-central1-b --accelerator-type=v6e-8 \
+    --version=v2-alpha-tpuv6e --spot
+
+gcloud compute tpus tpu-vm scp --recurse --zone=us-central1-b \
+    main.py requirements.txt scripts vit_jax_distributed \
+    vit-training:~/vit-jax-distributed-scaling/
+
+gcloud compute tpus tpu-vm ssh vit-training --zone=us-central1-b \
+    --command="cd ~/vit-jax-distributed-scaling && bash scripts/setup.sh"
+
+gcloud compute tpus tpu-vm ssh vit-training --zone=us-central1-b \
+    --command="cd ~/vit-jax-distributed-scaling && bash scripts/run_gcp_tpu.sh"
+
+# Remember to delete afterwards --- spot VM keeps billing until you do.
+gcloud compute tpus tpu-vm delete vit-training --zone=us-central1-b
+\end{lstlisting}
+
+% =========================================================================
+\section{What to look at in the outputs}
+% =========================================================================
+
+Every run writes three files to \texttt{--output\_dir}:
+
+\begin{itemize}
+\item \texttt{step\_metrics.csv} --- one row per logged step: loss, accuracy, step time.
+\item \texttt{epoch\_metrics.csv} --- one row per epoch: aggregated train + test metrics.
+\item \texttt{training\_log.json} --- config, metadata, and all step/epoch logs.
+\end{itemize}
+
+Each experiment adds plots:
+
+\begin{itemize}
+\item Scaling: \texttt{throughput\_vs\_devices.png}, \texttt{step\_time\_vs\_devices.png},
+      \texttt{scaling\_efficiency\_vs\_devices.png}.
+\item Straggler: \texttt{step\_time\_comparison.png}, \texttt{slowdown\_vs\_delay.png}.
+\end{itemize}
+
+The scaling-efficiency plot is the most interpretable single number: a flat line near $1.0$
+means your distributed setup is not losing throughput to communication; a downward slope means
+it is.
+
+% =========================================================================
+\section{Further reading and things to try}
+% =========================================================================
+
+\begin{itemize}
+\item \textbf{Swap CIFAR for something bigger.} Imagenette or Tiny-ImageNet will push per-step
+      compute higher, making the all-reduce overhead relatively smaller and the scaling
+      efficiency closer to $1.0$. A useful contrast to run.
+\item \textbf{Try \texttt{pjit}/\texttt{shard\_map}.} Port the same model to \texttt{jit} + a
+      SPMD mesh; you will see near-identical throughput for pure data parallelism but cleaner
+      code.
+\item \textbf{Compute-communication overlap.} Look at what happens if you replace
+      \texttt{pmean(grads)} with a manual \texttt{psum} and start the all-reduce asynchronously
+      during the optimizer step.
+\item \textbf{Real straggler sources.} Replace the synthetic \texttt{fori\_loop} with a
+      \texttt{jax.lax.while\_loop} keyed on a random per-device delay, to see the effect of
+      \emph{variance} in per-device times rather than a constant straggler.
+\end{itemize}
+
+\end{document}
