@@ -9,14 +9,19 @@
 \usepackage{graphicx}
 \usepackage{xcolor}
 \usepackage{listings}
+\usepackage[most]{tcolorbox}
+\usepackage{enumitem}
 \usepackage{hyperref}
 \hypersetup{colorlinks=true,linkcolor=blue!60!black,urlcolor=blue!60!black,citecolor=blue!60!black}
 
 % ------- Code listing style ----------------------------------------------
+% Fix: previously commentstyle had \itshape, which renders badly in
+% Computer Modern Typewriter. Drop the slant; keep colour only. Strings stay
+% upright too so code blocks read cleanly.
 \definecolor{codebg}{RGB}{248,248,248}
 \definecolor{keyword}{RGB}{0,102,153}
 \definecolor{string}{RGB}{170,55,55}
-\definecolor{comment}{RGB}{100,100,100}
+\definecolor{comment}{RGB}{95,110,120}
 
 \lstdefinestyle{py}{
     language=Python,
@@ -24,7 +29,7 @@
     basicstyle=\ttfamily\small,
     keywordstyle=\color{keyword}\bfseries,
     stringstyle=\color{string},
-    commentstyle=\color{comment}\itshape,
+    commentstyle=\color{comment},   % upright, no \itshape
     showstringspaces=false,
     breaklines=true,
     frame=single,
@@ -33,7 +38,8 @@
     numbers=left,
     numberstyle=\tiny\color{gray},
     numbersep=8pt,
-    tabsize=4
+    tabsize=4,
+    upquote=true
 }
 \lstset{style=py}
 
@@ -42,7 +48,7 @@
     backgroundcolor=\color{codebg},
     basicstyle=\ttfamily\small,
     keywordstyle=\color{keyword},
-    commentstyle=\color{comment}\itshape,
+    commentstyle=\color{comment},
     showstringspaces=false,
     breaklines=true,
     frame=single,
@@ -50,9 +56,86 @@
     xleftmargin=0pt
 }
 
-% ------- Title ------------------------------------------------------------
+% ------- Pedagogical boxes -----------------------------------------------
+\newcounter{exercise}[section]
+\renewcommand{\theexercise}{\thesection.\arabic{exercise}}
+\newcounter{lab}
+\renewcommand{\thelab}{\arabic{lab}}
+
+\newtcolorbox{objectives}{
+    enhanced, breakable, colback=green!3, colframe=green!50!black,
+    title={Learning objectives}, fonttitle=\bfseries\color{white},
+    coltitle=white, sharp corners, boxrule=0.6pt,
+    attach boxed title to top left={xshift=4mm, yshift=-3mm},
+    boxed title style={colback=green!50!black, sharp corners, boxrule=0pt},
+    left=3mm, right=3mm, top=3mm, bottom=2mm
+}
+
+\newtcolorbox{keypoint}[1][Key idea]{
+    enhanced, breakable, colback=blue!3, colframe=blue!55!black,
+    title={#1}, fonttitle=\bfseries\color{white},
+    coltitle=white, sharp corners, boxrule=0.6pt,
+    attach boxed title to top left={xshift=4mm, yshift=-3mm},
+    boxed title style={colback=blue!55!black, sharp corners, boxrule=0pt},
+    left=3mm, right=3mm, top=3mm, bottom=2mm
+}
+
+\newtcolorbox{pitfall}[1][Watch out]{
+    enhanced, breakable, colback=red!3, colframe=red!55!black,
+    title={#1}, fonttitle=\bfseries\color{white},
+    coltitle=white, sharp corners, boxrule=0.6pt,
+    attach boxed title to top left={xshift=4mm, yshift=-3mm},
+    boxed title style={colback=red!55!black, sharp corners, boxrule=0pt},
+    left=3mm, right=3mm, top=3mm, bottom=2mm
+}
+
+% Exercise box with auto-numbered title and optional difficulty + topic.
+\newtcolorbox{exercise}[1][]{
+    enhanced, breakable, colback=orange!3, colframe=orange!70!black,
+    title={Exercise \refstepcounter{exercise}\theexercise\ \textnormal{\normalfont #1}},
+    fonttitle=\bfseries\color{white}, coltitle=white,
+    sharp corners, boxrule=0.6pt,
+    attach boxed title to top left={xshift=4mm, yshift=-3mm},
+    boxed title style={colback=orange!70!black, sharp corners, boxrule=0pt},
+    left=3mm, right=3mm, top=3mm, bottom=2mm
+}
+
+\newtcolorbox{predict}{
+    enhanced, breakable, colback=violet!3, colframe=violet!60!black,
+    title={Predict, then verify}, fonttitle=\bfseries\color{white},
+    coltitle=white, sharp corners, boxrule=0.6pt,
+    attach boxed title to top left={xshift=4mm, yshift=-3mm},
+    boxed title style={colback=violet!60!black, sharp corners, boxrule=0pt},
+    left=3mm, right=3mm, top=3mm, bottom=2mm
+}
+
+\newtcolorbox{checkpoint}{
+    enhanced, breakable, colback=yellow!8, colframe=yellow!40!black,
+    title={Check your understanding}, fonttitle=\bfseries\color{white},
+    coltitle=white, sharp corners, boxrule=0.6pt,
+    attach boxed title to top left={xshift=4mm, yshift=-3mm},
+    boxed title style={colback=yellow!40!black, sharp corners, boxrule=0pt},
+    left=3mm, right=3mm, top=3mm, bottom=2mm
+}
+
+\newtcolorbox{lab}[1][Hands-on lab]{
+    enhanced, breakable, colback=teal!5, colframe=teal!60!black,
+    title={Lab \refstepcounter{lab}\thelab: \textnormal{\normalfont #1}},
+    fonttitle=\bfseries\color{white}, coltitle=white,
+    sharp corners, boxrule=0.6pt,
+    attach boxed title to top left={xshift=4mm, yshift=-3mm},
+    boxed title style={colback=teal!60!black, sharp corners, boxrule=0pt},
+    left=3mm, right=3mm, top=3mm, bottom=2mm
+}
+
+% Blank answer space inside boxes
+\newcommand{\answerspace}[1][3]{\vspace{#1\baselineskip}}
+\newcommand{\stars}[1]{\textbf{\small(#1)}}
+
+% ------- Title -----------------------------------------------------------
 \title{\textbf{ViT-JAX Distributed Scaling}\\
-       \large Study notes on data-parallel Vision Transformer training on TPU}
+       \large A study guide: data-parallel Vision Transformer training on TPU\\
+       \normalsize with exercises, predictions, and hands-on labs}
 \author{Project notes}
 \date{}
 
@@ -60,14 +143,31 @@
 \maketitle
 
 \begin{abstract}
-\noindent This document is a study-notes writeup of the \texttt{vit-jax-distributed-scaling}
-project: we train a Vision Transformer (ViT-Small) on CIFAR-100 using JAX/Flax, parallelised
-with \texttt{jax.pmap}, and use the setup to probe two systems questions:
-(i) \emph{how does throughput scale with device count?} and
-(ii) \emph{how badly does a single slow worker hurt synchronous training?}
-Every section pairs the conceptual intuition with the minimal piece of code that implements
-it, so the document doubles as a guided reading of the repository.
+\noindent This study guide walks through the \texttt{vit-jax-distributed-scaling}
+project: training a Vision Transformer on CIFAR-100 with JAX/Flax, parallelised via
+\texttt{jax.pmap}, and using the setup to investigate two systems questions ---
+\emph{how does throughput scale with device count?} and \emph{how badly does a single
+slow worker hurt synchronous training?}. Every section pairs intuition with the code
+that implements it, and ends with exercises, predictions, and labs for you to work through.
 \end{abstract}
+
+\section*{How to use this guide}
+
+Each chapter follows the same rhythm:
+\begin{enumerate}
+    \item \textbf{Learning objectives} tell you what you should be able to do by the end.
+    \item \textbf{Key ideas} (blue boxes) capture the single most important takeaway of a concept.
+    \item \textbf{Predictions} (violet) ask you to commit to an answer \emph{before} you see ours.
+    \item \textbf{Exercises} (orange) are short problems. Difficulty is marked \stars{1}--\stars{3}:
+          \stars{1} a definition or lookup, \stars{2} pen-and-paper reasoning, \stars{3} coding or a real measurement.
+    \item \textbf{Check your understanding} (yellow) is a quick self-test at section boundaries.
+    \item \textbf{Watch out} (red) highlights easy mistakes.
+    \item \textbf{Labs} (teal) are hands-on activities on your own TPU/GPU.
+\end{enumerate}
+
+\noindent Work through the guide with a notebook next to you. Write your answers in the
+notebook, not on the PDF --- writing by hand is where most of the learning happens.
+Selected solutions are in Appendix~A.
 
 \tableofcontents
 \vspace{1em}
@@ -75,26 +175,37 @@ it, so the document doubles as a guided reading of the repository.
 \vspace{1em}
 
 % =========================================================================
-\section{What we built, and why}
+\section{What we are building, and why}
 % =========================================================================
 
-A Vision Transformer trains by (a) splitting an image into patches,
-(b) treating the patches as a token sequence, and (c) feeding that sequence through a stack of
-transformer blocks. Training one is cheap; training one \emph{at scale, across accelerators}
-exposes two systems phenomena that matter far beyond ViT:
-
-\begin{itemize}
-\item The \textbf{all-reduce barrier}: every device must reach the gradient-average step before any
-      can proceed. This is the single most important synchronisation primitive in data-parallel
-      training, and it is what makes distributed training brittle to slow workers.
-\item \textbf{Scaling efficiency}: doubling the devices never exactly doubles throughput because
-      gradients have to travel over an interconnect. Measuring how much you lose is how you tell
-      whether your distributed strategy is working.
+\begin{objectives}
+By the end of this section you should be able to:
+\begin{itemize}[leftmargin=*, itemsep=1pt]
+    \item explain in one sentence what data-parallel training is;
+    \item name the two systems phenomena this project is designed to measure;
+    \item locate every module in the repo and say what it owns.
 \end{itemize}
+\end{objectives}
 
-We use ViT-Small on CIFAR-100 because the model is small enough ($\sim$10M parameters) that
-per-step work is short, so the all-reduce and straggler effects dominate the signal we want to
-measure. On a bigger model the compute would hide everything.
+A Vision Transformer trains by (a)~splitting an image into patches, (b)~treating those
+patches as a token sequence, and (c)~feeding the sequence through a stack of transformer
+blocks. Training one on a single accelerator is unremarkable; training one
+\emph{across} accelerators exposes two phenomena that matter far beyond ViT:
+
+\begin{keypoint}[Two phenomena we care about]
+\textbf{(1) The all-reduce barrier.} Every device must reach the gradient-averaging step
+before any device can proceed. This is the single most important synchronisation primitive
+in data-parallel training, and it is what makes distributed training brittle to slow workers.
+
+\textbf{(2) Scaling efficiency.} Doubling the devices never exactly doubles throughput,
+because gradients have to travel between them. Measuring how much you lose is how you
+diagnose whether your distributed strategy is working.
+\end{keypoint}
+
+\noindent We choose ViT-Small on CIFAR-100 because the model is small enough
+($\sim$9.5M parameters) that per-step compute is short --- and short per-step compute is
+precisely what makes the all-reduce cost \emph{visible} relative to forward/backward time.
+With a bigger model, compute hides everything we want to see.
 
 \subsection{Repo layout}
 
@@ -113,9 +224,9 @@ scripts/setup.sh            # installs jax[tpu|cuda|cpu] per host
 scripts/run_gcp_tpu.sh      # end-to-end TPU run
 \end{lstlisting}
 
-\subsection{Smoke-test result (the numbers we are going to explain)}
+\subsection{The numbers we will explain}
 
-On an 8-chip TPU v6e spot VM, a two-epoch run produced:
+On an 8-chip TPU v6e spot VM, our two-epoch smoke test produced:
 
 \begin{center}
 \begin{tabular}{lr}
@@ -131,45 +242,76 @@ Test accuracy after 2 epochs   & 22.0\% \\
 \end{tabular}
 \end{center}
 
-The 65-second first step is not a bug; it is XLA tracing and compiling the pmap'd training
-step into a TPU executable. Every subsequent step re-uses that compiled graph, which is why
-they are $\sim$2000$\times$ faster.
+\begin{exercise}[Per-device arithmetic, \stars{1}]
+If global batch size is 512 and we have 8 TPU chips, how many images does each chip
+process per step? How many steps does one epoch take over 50{,}000 training images?
+\answerspace[2]
+\end{exercise}
+
+\begin{exercise}[Why the first step is slow, \stars{2}]
+The first training step took 65 seconds. Every subsequent step took about 33 milliseconds.
+What is happening during that first step that does not repeat? State a one-sentence hypothesis
+now; we will confirm it in Section~\ref{sec:training-loop}.
+\answerspace[2]
+\end{exercise}
 
 % =========================================================================
 \section{The model: ViT-Small}
 % =========================================================================
 
-\subsection{Intuition: images as sequences}
+\begin{objectives}
+\begin{itemize}[leftmargin=*, itemsep=1pt]
+    \item describe how an image becomes a sequence of tokens;
+    \item explain what the \texttt{[CLS]} token is for;
+    \item give one reason pre-norm transformers train more stably than post-norm.
+\end{itemize}
+\end{objectives}
 
-Transformers are sequence models. To feed them an image we turn the image into a sequence:
+\subsection{Images as sequences}
+
+Transformers are sequence models. To feed them an image we must turn the image
+\emph{into} a sequence:
 
 \begin{enumerate}
-\item Tile the $32 \times 32$ image into non-overlapping $4 \times 4$ patches, yielding 64 patches.
+\item Tile the $32 \times 32$ image into non-overlapping $4 \times 4$ patches, giving $64$ patches.
 \item Flatten each patch and project it through a learnable linear layer to get a 384-dim token.
-\item Prepend a learnable \texttt{[CLS]} token (so we have 65 tokens total).
+\item Prepend a learnable \texttt{[CLS]} token (so 65 tokens total).
 \item Add learnable positional embeddings (the model cannot recover spatial position otherwise).
 \end{enumerate}
 
-The output of this preprocessing is a tensor of shape $(B, 65, 384)$: a batch of 65-token
-sequences, each token a 384-dim embedding. From here on it is pure Transformer encoder.
+The output is a tensor of shape $(B, 65, 384)$: a batch of 65-token sequences.
+From here on it is a pure Transformer encoder.
 
-\subsection{Pre-norm blocks}
+\begin{exercise}[Token bookkeeping, \stars{1}]
+If we changed the image size to $64 \times 64$ while keeping patch size $4$, how many
+patches would we have? How many tokens go into the transformer?
+\answerspace[1]
+\end{exercise}
 
-Each transformer block is:
-$$
-x' = x + \text{Attn}(\text{LN}(x)), \qquad x'' = x' + \text{MLP}(\text{LN}(x'))
-$$
+\begin{exercise}[Why \texttt{[CLS]}? \stars{2}]
+The classifier reads only the single \texttt{[CLS]} token, not all 65. What mechanism in the
+transformer lets this one token summarise the whole image? Write a two-sentence explanation.
+\answerspace[3]
+\end{exercise}
 
-Applying LayerNorm \emph{before} attention and MLP (``pre-norm'') is the standard choice in modern
-ViT and GPT-style models: it stabilises training at depth because the residual stream stays at
-unit scale regardless of how many layers you stack.
+\subsection{Pre-norm transformer blocks}
+
+Each block is:
+$$x' = x + \text{Attn}(\text{LN}(x)), \qquad x'' = x' + \text{MLP}(\text{LN}(x'))$$
+
+\begin{keypoint}[Pre-norm stabilises deep stacks]
+Applying LayerNorm \emph{before} attention and MLP (rather than after) keeps the residual
+stream at unit scale regardless of depth. Post-norm variants train fine up to $\sim$12
+layers but tend to need careful warmup at higher depth; pre-norm trains predictably at
+100+ layers.
+\end{keypoint}
 
 \subsection{Classification head}
 
 After $N$ transformer blocks and a final LayerNorm, we read out the \texttt{[CLS]} token only
-(\texttt{x[:, 0]}) and feed it through a linear layer to 100 logits. The intuition: the
-self-attention has, over $N$ rounds, aggregated information from every patch \emph{into} the CLS
-token, so it is a learned summary of the whole image.
+(\texttt{x[:, 0]}) and feed it through a linear layer to 100 logits. Over $N$ rounds of
+self-attention, the CLS token has aggregated information from every patch, making it a
+learned summary of the whole image.
 
 \subsection{Code: patch embedding}
 
@@ -182,8 +324,8 @@ class PatchEmbedding(nn.Module):
     @nn.compact
     def __call__(self, x):
         B = x.shape[0]
-        N = (self.image_size // self.patch_size) ** 2    # 64 patches
-        # (B, H, W, C) -> (B, N, patch_size*patch_size*C) -> (B, N, hidden_dim)
+        N = (self.image_size // self.patch_size) ** 2    # number of patches
+        # (B, H, W, C) -> (B, N, patch*patch*C) -> (B, N, hidden_dim)
         x = nn.Dense(self.hidden_dim, name="patch_projection")(
             x.reshape(B, self.image_size // self.patch_size, self.patch_size,
                          self.image_size // self.patch_size, self.patch_size, -1)
@@ -195,20 +337,35 @@ class PatchEmbedding(nn.Module):
         return x + pos
 \end{lstlisting}
 
-Full architecture (\texttt{vit\_jax\_distributed/models/vit.py}): 8 transformer blocks, hidden
-384, 6 heads, MLP dim 768, $\sim$9.5M parameters. Standard ViT-Small-for-CIFAR.
+\begin{checkpoint}
+\begin{enumerate}[leftmargin=*]
+\item In the listing above, after line~9 what is the shape of \texttt{x}? After line~13?
+\item If we doubled \texttt{hidden\_dim} from 384 to 768, which parameter tensors change size?
+\item What happens to the model if we forget to add \texttt{pos\_embedding}?
+\end{enumerate}
+\answerspace[4]
+\end{checkpoint}
 
 % =========================================================================
 \section{Data pipeline}
 % =========================================================================
 
-CIFAR-100 is 50{,}000 training images, $32 \times 32 \times 3$ each. Standardised and stored as
-float32 that is $50000 \cdot 32 \cdot 32 \cdot 3 \cdot 4 \approx 614$ MB. The full dataset fits
-comfortably in RAM, so we skip \texttt{tf.data} entirely and use a plain numpy iterator:
+\begin{objectives}
+\begin{itemize}[leftmargin=*, itemsep=1pt]
+    \item explain why we skip \texttt{tf.data} and use an in-memory numpy iterator;
+    \item compute the shape of a sharded batch;
+    \item describe how random crop with reflection padding differs from simple random crop.
+\end{itemize}
+\end{objectives}
+
+CIFAR-100 is 50{,}000 training images, $32 \times 32 \times 3$ each. Standardised and stored
+as float32:
+$$50{,}000 \times 32 \times 32 \times 3 \times 4 \text{ bytes} \approx 614 \text{ MB}.$$
+The full dataset fits comfortably in RAM, so we bypass \texttt{tf.data} entirely:
 
 \begin{lstlisting}[style=py]
 def _numpy_data_iterator(images, labels, batch_size, shuffle, augment, loop, seed):
-    n     = images.shape[0]
+    n      = images.shape[0]
     usable = (n // batch_size) * batch_size          # drop the ragged tail
     rng    = np.random.RandomState(seed)
     while True:
@@ -224,14 +381,14 @@ def _numpy_data_iterator(images, labels, batch_size, shuffle, augment, loop, see
         if not loop: break
 \end{lstlisting}
 
-\textbf{Augmentation.} Random horizontal flip and random crop with 4-pixel reflection padding.
-Both are vectorised with advanced indexing over the whole batch; no per-image Python loop.
+\textbf{Augmentation} is random horizontal flip plus random crop with 4-pixel reflection
+padding. Both are vectorised with advanced indexing over the whole batch --- no per-image
+Python loops.
 
 \subsection{Sharding for pmap}
 
-Every distributed step needs each device's private slice of the batch. We reshape
-$(B, H, W, C) \to (\text{num\_devices}, B/\text{num\_devices}, H, W, C)$ and let pmap dispatch
-slice $i$ to device $i$:
+Each distributed step needs each device's private slice of the global batch. We reshape
+$(B, H, W, C) \to (\text{num\_devices}, B/\text{num\_devices}, H, W, C)$:
 
 \begin{lstlisting}[style=py]
 def shard_batch(batch, num_devices):
@@ -243,15 +400,45 @@ def shard_batch(batch, num_devices):
 
 A global batch of 512 across 8 devices means each device sees 64 images per step.
 
+\begin{exercise}[Sharded shapes, \stars{1}]
+You have global batch size \texttt{1024} and \texttt{num\_devices=8}. What shape does
+\texttt{shard\_batch} produce for the \texttt{image} array? For the \texttt{label} array?
+\answerspace[2]
+\end{exercise}
+
+\begin{exercise}[Off-by-one, \stars{2}]
+What happens if \texttt{batch\_size} is \texttt{513} and \texttt{num\_devices} is \texttt{8}?
+Trace the code and explain the error. Which function is responsible for preventing this
+in \texttt{get\_datasets}?
+\answerspace[3]
+\end{exercise}
+
+\begin{exercise}[Why \texttt{copy()}? \stars{2}]
+Line~10 of the iterator does \texttt{images[batch\_idx].copy()}. What goes wrong if we
+remove the \texttt{.copy()}?\\
+Hint: think about \texttt{\_augment\_batch}'s in-place flip.
+\answerspace[3]
+\end{exercise}
+
 % =========================================================================
-\section{Distributed training: the conceptual heart}
+\section{Distributed training: pmap}
 % =========================================================================
+
+\begin{objectives}
+\begin{itemize}[leftmargin=*, itemsep=1pt]
+    \item explain the acronym SPMD and how \texttt{jax.pmap} implements it;
+    \item predict the shape of inputs and outputs of a pmap'd function;
+    \item explain why indexing \texttt{loss[0]} on a pmap'd output is safe.
+\end{itemize}
+\end{objectives}
 
 \subsection{SPMD and pmap}
 
-JAX's \texttt{jax.pmap} is a SPMD (``Single Program, Multiple Data'') primitive. You write one
-function; pmap arranges for it to run on every device simultaneously, each device receiving its
-own slice of the input.
+\begin{keypoint}[SPMD in one line]
+\textbf{S}ingle \textbf{P}rogram, \textbf{M}ultiple \textbf{D}ata: you write one function, and
+pmap arranges for it to run on every device simultaneously, each receiving its own slice of
+the input.
+\end{keypoint}
 
 \begin{lstlisting}[style=py]
 @partial(jax.pmap, axis_name="batch", devices=devices)
@@ -259,38 +446,46 @@ def train_step(state, batch, rng):
     ...
 \end{lstlisting}
 
-Two things worth internalising:
-\begin{itemize}
-\item Inputs to a pmap'd function must have a leading dimension of size \texttt{len(devices)};
-      pmap strips this dimension and gives device $i$ the $i$-th slice.
-\item Outputs \emph{keep} a leading device dimension. To read a scalar loss on the host you
-      usually index \texttt{loss[0]} --- because loss was \texttt{pmean}'d across devices, every
-      device holds the same value.
-\end{itemize}
+Two rules worth internalising:
+
+\begin{enumerate}
+\item Inputs must have a leading axis of size \texttt{len(devices)}; pmap strips this axis
+      and hands device~$i$ the $i$-th slice.
+\item Outputs \emph{retain} a leading device axis. To read a scalar on the host you index
+      \texttt{value[0]} --- any entry works when the value was \texttt{pmean}'d, since every
+      device then holds the same number.
+\end{enumerate}
+
+\begin{exercise}[Input/output shapes, \stars{2}]
+A pmap'd function \texttt{f(x)} is defined for \texttt{x} of shape \texttt{(B, 128)} inside
+the function body. If you call it with \texttt{devices=8} and pass an input of shape
+\texttt{(8, 64, 128)}, what shape does each device see? What shape does the outer caller
+see coming back, assuming \texttt{f} returns a tensor shaped like \texttt{x}?
+\answerspace[3]
+\end{exercise}
 
 \subsection{All-reduce via pmean}
 
-The magic happens inside the step: after each device has computed its local gradients from its
-slice of the batch, we \emph{average} those gradients across every device. That averaging is the
-\textbf{all-reduce} operation, and it is what makes the whole thing mathematically equivalent to
-training on one device with the full global batch.
+After each device has computed its local gradients from its slice of the batch, we
+\emph{average} those gradients across every device. That averaging is an \textbf{all-reduce},
+and it is what makes the whole pipeline mathematically equivalent to training on one device
+with the full global batch.
 
 \begin{lstlisting}[style=py]
-grads = jax.lax.pmean(grads, axis_name="batch")   # <-- the all-reduce
+grads = jax.lax.pmean(grads, axis_name="batch")   # the all-reduce
 loss  = jax.lax.pmean(loss,  axis_name="batch")
 acc   = jax.lax.pmean(acc,   axis_name="batch")
 new_state = state.apply_gradients(grads=grads)
 \end{lstlisting}
 
-The name \texttt{"batch"} is arbitrary; it names the pmap axis. You can have nested pmaps with
-different axis names (``batch'' for data parallel, ``model'' for tensor parallel) --- not used in
-this project, but the pattern generalises.
+\begin{keypoint}[The barrier]
+\texttt{pmean} is a \textbf{collective} operation: it cannot complete on any single device
+until every device has contributed its value. Every training step therefore has an implicit
+synchronisation barrier. Slow workers hold up fast ones. This is the mechanism the
+\textbf{straggler experiment} isolates.
+\end{keypoint}
 
-\subsection{Why this matters: the barrier}
-
-All-reduce is a \textbf{collective} operation: it cannot complete on any single device until
-every device has contributed its gradient. Every training step therefore has an implicit barrier
-where slow workers hold up fast ones. Schematically:
+Schematically, one training step looks like:
 
 \begin{lstlisting}[style=sh]
 Device 0: forward -> backward -> [pmean] -> optimizer step
@@ -302,19 +497,30 @@ Device 3: forward -> backward -> [pmean] -> optimizer step
                            nobody moves until everybody arrives
 \end{lstlisting}
 
-This is the phenomenon the \textbf{straggler experiment} isolates.
+\begin{exercise}[Forget the pmean? \stars{3}]
+Imagine we accidentally remove the line \texttt{grads = jax.lax.pmean(grads, axis\_name="batch")}
+from \texttt{train\_step}. Training will still run without error. What goes wrong?
+\answerspace[3]
+\end{exercise}
+
+\begin{exercise}[NaN on one device, \stars{3}]
+If device~3 computes a \texttt{NaN} gradient on some step but the other seven devices do not,
+what does \texttt{pmean(grads)} produce? What do the other devices end up training with?
+Why is this the argument \emph{for} gradient clipping in production?
+\answerspace[3]
+\end{exercise}
 
 \subsection{Train state and replication}
 
-Flax's \texttt{TrainState} bundles model apply function + parameters + optimizer state. We
-create one master copy, then replicate it across every device with \texttt{flax.jax\_utils.replicate},
-which prepends a device axis of size \texttt{len(devices)}:
+Flax's \texttt{TrainState} bundles the model's apply function, parameters, and optimizer
+state. We build one master copy, then replicate it across every device:
 
 \begin{lstlisting}[style=py]
 def create_train_state(rng, model, lr, image_size, weight_decay, warmup_steps, total_steps):
     dummy  = jnp.ones([1, image_size, image_size, 3])
     params = model.init(rng, dummy, train=False)["params"]
 
+    # Clamp warmup so short runs don't violate decay_steps > warmup_steps.
     effective_warmup = min(warmup_steps, max(1, total_steps // 2))
     schedule = optax.warmup_cosine_decay_schedule(
         init_value=0.0, peak_value=lr,
@@ -322,18 +528,35 @@ def create_train_state(rng, model, lr, image_size, weight_decay, warmup_steps, t
     tx = optax.adamw(learning_rate=schedule, weight_decay=weight_decay)
     return TrainState.create(apply_fn=model.apply, params=params, tx=tx)
 
-state = replicate_state(state, devices=devices)     # <- broadcast to all devices
+state = replicate_state(state, devices=devices)
 \end{lstlisting}
 
-The clamp on \texttt{effective\_warmup} exists because \texttt{optax.warmup\_cosine\_decay\_schedule}
-internally computes \texttt{decay\_steps - warmup\_steps} and errors out on a negative result ---
-which is exactly what happens when you run a two-epoch smoke test with the default 500-step
-warmup. Clamping to $\text{total\_steps}/2$ keeps the long-run behaviour unchanged while making
-short runs legal.
+\begin{pitfall}[The warmup-vs-total-steps bug]
+\texttt{optax.warmup\_cosine\_decay\_schedule} assumes \texttt{decay\_steps > warmup\_steps};
+if it is not, you get \texttt{ValueError: decay\_steps=-306}. A 2-epoch smoke test runs
+only 194 steps, far short of the default 500-step warmup, so we clamp
+\texttt{effective\_warmup} to \texttt{total\_steps // 2}. Long runs still use the intended
+warmup; short runs self-adjust.
+\end{pitfall}
+
+\begin{exercise}[Fixing the clamp differently, \stars{2}]
+Propose at least two other valid ways to handle the case where
+\texttt{warmup\_steps >= total\_steps}. Which one would you prefer, and why?
+\answerspace[3]
+\end{exercise}
 
 % =========================================================================
-\section{Putting it together: the training loop}
+\section{The training loop}
+\label{sec:training-loop}
 % =========================================================================
+
+\begin{objectives}
+\begin{itemize}[leftmargin=*, itemsep=1pt]
+    \item trace a single training step from batch fetch to parameter update;
+    \item identify where the implicit host$\to$device barrier lives;
+    \item explain the two distinct roles of PRNG keys in this loop.
+\end{itemize}
+\end{objectives}
 
 \begin{lstlisting}[style=py]
 state        = replicate_state(state, devices=devices)
@@ -353,81 +576,168 @@ for epoch in range(config.epochs):
         step_loss = float(metrics["loss"][0])    # implicit host barrier
         step_acc  = float(metrics["accuracy"][0])
 
-    # end of epoch: evaluate
     test_metrics = _run_evaluation(state, p_eval_step, config, num_devices)
 \end{lstlisting}
 
-Four things worth noticing:
-
+\begin{keypoint}[Four things to notice]
 \begin{enumerate}
-\item \textbf{One RNG per device.} \texttt{jax.random.split(step\_rng, num\_devices)} gives each
-      device its own dropout stream. Without this, every device would apply identical dropout,
-      reducing regularisation strength.
-\item \textbf{Asynchronous dispatch.} \texttt{p\_train\_step} returns immediately with lazy
-      arrays; the compute runs on TPU in the background. The \texttt{float(metrics["loss"][0])}
-      call is what blocks the host until the step is actually done --- this is our implicit
-      barrier for timing.
-\item \textbf{Metrics are pmean'd inside the pmap}, so \texttt{metrics["loss"]} has shape
-      \texttt{(num\_devices,)} and every entry is equal. Indexing \texttt{[0]} just picks any one.
-\item \textbf{Per-step batch sharding.} Sharding is a host-side numpy reshape, not a TPU op, so
-      it is practically free compared to the $\sim$33 ms step itself.
+\item \textbf{One RNG per device.} \texttt{jax.random.split(step\_rng, num\_devices)} gives
+      each device its own dropout stream. Without this, every device would apply identical
+      dropout and regularisation strength would effectively halve.
+\item \textbf{Asynchronous dispatch.} \texttt{p\_train\_step} returns lazy arrays immediately;
+      compute runs on TPU in the background. The \texttt{float(...)} call is what blocks the
+      host until the step is actually done.
+\item \textbf{Metrics have a device axis.} \texttt{metrics["loss"]} has shape
+      \texttt{(num\_devices,)}, every entry equal because of \texttt{pmean}. Indexing
+      \texttt{[0]} just picks any one.
+\item \textbf{Batch sharding is a numpy reshape.} It runs on the host and is effectively
+      free compared to the $\sim$33 ms step.
 \end{enumerate}
+\end{keypoint}
+
+\begin{exercise}[Where is the barrier? \stars{2}]
+In the code above, which \emph{exact} line causes the host to block until the TPU has
+finished a step? Why is that line semantically equivalent to a barrier?
+\answerspace[3]
+\end{exercise}
+
+\begin{exercise}[Why split keys per device? \stars{3}]
+Remove line~11 (the second \texttt{jax.random.split}) and instead pass the single \texttt{step\_rng}
+broadcast to all devices. Training will still run. What breaks, subtly? Can you design a tiny
+experiment to detect the difference?
+\answerspace[4]
+\end{exercise}
+
+\begin{checkpoint}
+\begin{enumerate}[leftmargin=*]
+\item Rewrite the loop pseudocode using just the verbs ``fetch'', ``shard'', ``step'', ``barrier'',
+      ``log''. Be terse.
+\item Before the first step runs, what does \texttt{state} look like in memory? After the first
+      step, has anything changed in its layout?
+\item Does the number of Python iterations match the number of optimizer steps? Why or why not?
+\end{enumerate}
+\answerspace[4]
+\end{checkpoint}
 
 % =========================================================================
-\section{Experiments}
+\section{Experiment 1: scaling}
 % =========================================================================
 
-\subsection{Scaling experiment}
+\begin{objectives}
+\begin{itemize}[leftmargin=*, itemsep=1pt]
+    \item define throughput, step time, and scaling efficiency formally;
+    \item predict the shape of the efficiency curve given compute and communication costs;
+    \item execute the scaling experiment on your own hardware and interpret the plots.
+\end{itemize}
+\end{objectives}
 
-\subsubsection*{What we are measuring}
+\subsection{What we are measuring}
 
-For $k \in \{1, 2, 4, 8\}$ we measure:
+For $k \in \{1, 2, 4, 8\}$ devices we measure:
+
 \begin{itemize}
-\item \textbf{Step time} $T_k$: median wall-clock time to execute one forward-backward-update
-      cycle on $k$ devices with per-device batch size held constant, so the global batch grows
-      with $k$.
+\item \textbf{Step time} $T_k$: median wall-clock time for one forward-backward-update cycle.
 \item \textbf{Throughput} $\Theta_k = B_k / T_k$ images per second, where $B_k = k \cdot B_1$.
 \item \textbf{Scaling efficiency} $\eta_k = \Theta_k / (k \cdot \Theta_1)$. Perfect scaling is
       $\eta = 1$.
 \end{itemize}
 
-\subsubsection*{What to expect, and why}
+\subsection{A simple model}
 
-Gradient averaging requires sending parameter-sized tensors between devices. Total all-reduce
-bandwidth is fixed, so as $k$ grows the constant communication cost takes a larger \emph{relative}
-bite out of step time. Concretely, if per-step compute is $C$ and all-reduce is $R$,
+Let $C$ be per-step compute time and $R$ the all-reduce time on $k$ devices. Then
 $$
-T_k \approx C + R, \qquad \eta_k \approx \frac{C}{C + R}
+T_k \approx C + R(k), \qquad \eta_k \approx \frac{C}{C + R(k)}.
 $$
-(ignoring topology, overlap, and the fact that $R$ itself grows with $k$). For our tiny model
-$C \sim 30$ ms and $R$ is small on a TPU v6e mesh, so we expect $\eta \gtrsim 0.85$ at $k=8$.
+$R(k)$ grows slowly with $k$ on mesh topologies (logarithmically for ring all-reduce),
+while $C$ is constant in per-device batch size. So $\eta_k$ decreases as $k$ grows.
 
-\subsubsection*{Measurement hygiene}
+\begin{predict}
+You have a model where $C = 30$ ms per step and $R(k) = 3 \log_2 k$ ms.
+Without running anything, compute $\eta_1, \eta_2, \eta_4, \eta_8$.
+Then state in words: \emph{as $k$ doubles, does efficiency fall by a constant factor, a
+constant amount, or something else?}
+\answerspace[4]
+\end{predict}
 
-\begin{itemize}
-\item \textbf{Warmup.} The first step compiles via XLA ($\sim$65 s on v6e-8). We run 10 warmup
-      steps before we start timing.
-\item \textbf{Explicit block.} We call \texttt{jax.tree.map(lambda x: x.block\_until\_ready(), state)}
-      after each timed step, so the tick captures actual device work and not just dispatch latency.
-\item \textbf{Device subset.} To benchmark a strict subset of devices, we forward
+\subsection{Measurement hygiene}
+
+\begin{enumerate}
+\item \textbf{Warmup.} The first step compiles via XLA ($\sim$65\,s on v6e-8). We run 10
+      untimed warmup steps before collecting numbers.
+\item \textbf{Explicit block.} We call
+      \texttt{jax.tree.map(lambda x: x.block\_until\_ready(), state)} after each timed step
+      so the tick captures real device work, not dispatch latency.
+\item \textbf{Device subset.} To benchmark a strict subset, we forward
       \texttt{devices=all\_devices[:k]} into \emph{both} \texttt{jax.pmap} \emph{and}
-      \texttt{flax.jax\_utils.replicate}. Forgetting either leaves pmap defaulting to all local
-      devices, and the sharded batch's leading dimension then mismatches.
+      \texttt{flax.jax\_utils.replicate}. Forgetting either leaves pmap defaulting to all
+      local devices, and the sharded batch's leading dim mismatches.
+\end{enumerate}
+
+\begin{pitfall}[The \texttt{devices=} trap]
+On a multi-device host (e.g. TPU v3-8), calling \texttt{jax.pmap(f)} without a
+\texttt{devices=} argument locks in \emph{all} local devices. If you then pass a batch with
+leading dim 4 while 8 devices are bound, you get a shape error. This project threads
+\texttt{devices=} through every \texttt{pmap} and \texttt{replicate} call; other codebases
+often don't.
+\end{pitfall}
+
+\begin{exercise}[Efficiency is bandwidth-bound, \stars{2}]
+Suppose we make the model 10$\times$ larger, keeping per-device batch size the same. What
+happens to $C$? What happens to $R(k)$ (recall: all-reduce traffic scales with parameter
+count)? Does efficiency go up, down, or stay the same?
+\answerspace[3]
+\end{exercise}
+
+\begin{lab}[Run the scaling experiment]
+\textbf{Step 1.} SSH into your TPU VM and run
+\begin{lstlisting}[style=sh]
+python3 main.py --experiment scaling --batch_size 1024 \
+    --precision bf16 --output_dir ~/outputs/scaling
+\end{lstlisting}
+\textbf{Step 2.} When it finishes, \texttt{scp} the CSV back to your laptop. Look at
+\texttt{scaling\_results.csv}. Fill in the table:
+
+\medskip
+\begin{tabular}{cccc}
+\toprule
+Devices & Mean step time (s) & Throughput (img/s) & Efficiency \\
+\midrule
+1 & & & \\
+2 & & & \\
+4 & & & \\
+8 & & & \\
+\bottomrule
+\end{tabular}
+
+\medskip
+\textbf{Step 3.} Did your $\eta_8$ match your prediction from the violet box above?
+If not, where did the simple model $C + R(k)$ break down?
+\answerspace[3]
+\end{lab}
+
+% =========================================================================
+\section{Experiment 2: straggler}
+% =========================================================================
+
+\begin{objectives}
+\begin{itemize}[leftmargin=*, itemsep=1pt]
+    \item explain why \texttt{time.sleep} cannot be used to simulate a straggler in JAX;
+    \item predict step-time slowdown as a linear function of injected delay;
+    \item connect the finding to production mitigations (async SGD, backup workers).
 \end{itemize}
+\end{objectives}
 
-\subsection{Straggler experiment}
+\subsection{The question}
 
-\subsubsection*{The question}
+A synchronous data-parallel system advances only as fast as its slowest worker. How much
+does a single slow device hurt total throughput?
 
-A synchronous data-parallel system only advances as fast as its slowest worker. How much does a
-single slow device hurt total throughput?
+\subsection{Injecting a real straggler}
 
-\subsubsection*{Injecting a real straggler}
-
-Naive \texttt{time.sleep(x)} is useless here: it is a Python call, and Python does not run
-\emph{inside} a pmap'd, JIT-compiled XLA program. Even if it did, an intelligent scheduler
-might just reorder around it. We need a delay XLA cannot elide, which means real compute with a
-real data dependency on itself:
+\texttt{time.sleep(x)} is useless here: it is a Python call, and Python does not run
+\emph{inside} a pmap'd, JIT-compiled XLA program. Even if it did, a smart scheduler might
+hide it behind other work. We need a delay XLA cannot elide --- real compute with a real
+data dependency on itself:
 
 \begin{lstlisting}[style=py]
 device_idx = jax.lax.axis_index("batch")          # 0..num_devices-1
@@ -442,94 +752,167 @@ dummy = jnp.ones((64, 64))
 _ = jax.lax.cond(device_idx == 0, _straggler, _no_delay, dummy)
 \end{lstlisting}
 
-Each loop iteration multiplies a $64 \times 64$ matrix by the identity and adds
-$0 \cdot a$: the data dependency on the previous iteration's \texttt{acc} stops the compiler
-from constant-folding or hoisting the loop, and the \texttt{lax.cond} on
-\texttt{axis\_index("batch") == 0} confines the work to one device.
+Each loop iteration multiplies a $64 \times 64$ matrix by the identity and adds $0 \cdot a$.
+The data dependency on the previous \texttt{acc} prevents the compiler from constant-folding
+or hoisting the loop out, and the \texttt{lax.cond} on \texttt{axis\_index("batch") == 0}
+confines the work to device 0.
 
-\subsubsection*{What to expect}
+\begin{exercise}[Why \texttt{lax.cond} and not Python \texttt{if}? \stars{2}]
+You might be tempted to write \texttt{if device\_idx == 0: <straggler>}. Explain why that
+does not work inside a pmap'd function, and what \texttt{jax.lax.cond} does differently.
+\answerspace[3]
+\end{exercise}
+
+\subsection{What to expect}
 
 For baseline step time $T$ and injected extra time $\Delta$ on one device,
 $$
 T_{\text{straggler}} \approx T + \Delta, \qquad
 \text{slowdown} = \frac{T_{\text{straggler}}}{T} \approx 1 + \frac{\Delta}{T}.
 $$
-In other words: \emph{every} device pays the straggler tax even though only one device is slow.
-A single bad worker in a 1000-GPU cluster makes the other 999 wait.
 
-The experiment sweeps \texttt{delay\_iterations} $\in \{100, 500, 1000, 5000, 10000\}$ and
-reports the ratio of straggler step time to baseline step time. The curve on log-$x$ axis should
-be roughly linear once $\Delta$ is large enough to dominate $T$.
+\begin{predict}
+Baseline $T \approx 33$ ms on 8 TPU v6e chips. Suppose injecting 1000 extra matmul
+iterations on device 0 adds $\Delta \approx 10$ ms of extra compute on that device.
+What slowdown factor do you expect?
+If the answer were instead 5$\times$, what \emph{must} have been true about the injected
+compute?
+\answerspace[4]
+\end{predict}
 
-\subsubsection*{Why this matters in production}
+\begin{exercise}[Why this matters in production, \stars{1}]
+Name three realistic sources of real stragglers in a production training cluster.
+\answerspace[2]
+\end{exercise}
 
-Real clusters have real stragglers: thermal throttling, bad NICs, GC pauses, a noisy neighbour
-on a shared node. The straggler experiment is a miniature of why techniques like
-asynchronous SGD, elastic averaging, hedged requests, and backup workers exist.
+\begin{lab}[Run the straggler experiment]
+\textbf{Step 1.} On the TPU VM:
+\begin{lstlisting}[style=sh]
+python3 main.py --experiment straggler --batch_size 512 \
+    --precision bf16 --output_dir ~/outputs/straggler
+\end{lstlisting}
+\textbf{Step 2.} Open \texttt{straggler\_results.csv}. Record for each delay:
+
+\medskip
+\begin{tabular}{ccc}
+\toprule
+Delay iterations & Mean step time (s) & Slowdown factor \\
+\midrule
+0 (baseline) & & 1.00$\times$ \\
+100  & & \\
+500  & & \\
+1000 & & \\
+5000 & & \\
+10000 & & \\
+\bottomrule
+\end{tabular}
+
+\medskip
+\textbf{Step 3.} Plot slowdown vs delay on log-$x$ axes mentally. Is the curve linear in
+$\log(\text{delay})$, linear in $\text{delay}$, or something else? What does the intercept
+tell you?
+\answerspace[3]
+\end{lab}
+
+\begin{checkpoint}
+\begin{enumerate}[leftmargin=*]
+\item In one sentence: why does a single slow device block seven others?
+\item Would \emph{asynchronous} SGD (no all-reduce, each device updates independently) fix
+      this? What would it cost you in return?
+\item What is a ``backup worker'' strategy? When is it cheap, and when is it wasteful?
+\end{enumerate}
+\answerspace[5]
+\end{checkpoint}
 
 % =========================================================================
-\section{TPU-specific notes}
+\section{TPU specifics}
 % =========================================================================
+
+\begin{objectives}
+\begin{itemize}[leftmargin=*, itemsep=1pt]
+    \item explain why JAX installation differs between TPU and GPU hosts;
+    \item describe what changes when you flip \texttt{jax\_default\_matmul\_precision} to bf16;
+    \item identify the trade-off between spot and on-demand TPU VMs.
+\end{itemize}
+\end{objectives}
 
 \subsection{Why JAX installs differently on TPU}
 
-TPU does not speak CUDA; it speaks over \texttt{libtpu}, a Google-provided shared library that
-plugs into JAX via a plugin. You \textbf{cannot} \texttt{pip install jax[cuda12]} on a TPU VM ---
-JAX will import successfully but fall back to CPU, silently, and your training will be
-$\sim$50$\times$ slower with no error. The correct install command is:
+TPUs do not speak CUDA; they speak over \texttt{libtpu}, a Google-provided shared library
+that plugs into JAX via a plugin.
 
+\begin{pitfall}[Silent fallback to CPU]
+If you run \texttt{pip install jax[cuda12]} on a TPU VM, JAX will import successfully but
+fall back to CPU with \emph{no error message}. Your training will be tens of times slower
+with zero warning. Always install from the TPU bucket:
 \begin{lstlisting}[style=sh]
 pip install -U "jax[tpu]>=0.4.20" \
     -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 \end{lstlisting}
-
-\texttt{scripts/setup.sh} detects TPU hosts by checking \texttt{/dev/accel*} and the
-\texttt{TPU\_NAME} env var --- deliberately \emph{before} JAX is installed, so it can choose the
-right wheel on a fresh VM.
+Our \texttt{setup.sh} detects TPU by looking at \texttt{/dev/accel*} and the \texttt{TPU\_NAME}
+env var --- deliberately before JAX is installed, so it can pick the right wheel on a fresh VM.
+\end{pitfall}
 
 \subsection{bf16 on the MXU}
 
-TPU v3 and v6e compute matmuls natively in bf16 (brain-float: 1 sign bit, 8 exponent bits,
-7 mantissa bits). Enabling bf16 for matmuls while keeping fp32 parameters is a one-liner:
+TPU v3 and v6e execute matmuls natively in bf16 (brain-float: 1 sign bit, 8 exponent bits,
+7 mantissa bits). Enabling bf16 for matmuls while keeping fp32 parameters is one line:
 
 \begin{lstlisting}[style=py]
 jax.config.update("jax_default_matmul_precision", "bfloat16")
 \end{lstlisting}
 
-This is what our \texttt{--precision bf16} flag does. It does \emph{not} change parameter dtype
-or optimizer state; it only tells XLA that every matmul (dense layers, attention QKV, einsum
-inside convolutions) can run the MXU in bf16 mode. On v6e this is typically a $1.5$--$2\times$
-throughput win for essentially free --- the narrower matmul precision is absorbed by the
-fp32 accumulator and the larger numbers that dominate training.
+\begin{keypoint}[What \texttt{jax\_default\_matmul\_precision} does]
+It does \emph{not} change parameter dtype or optimizer state. It tells XLA that every matmul
+(Dense, attention QKV, einsum, Conv) can run the MXU in bf16 mode. Accumulation is still fp32.
+On v6e this is typically a 1.5--2$\times$ throughput win for essentially free.
+\end{keypoint}
 
-\subsection{pmap vs pjit}
+\begin{exercise}[bf16 vs fp16, \stars{2}]
+bfloat16 has the same exponent range as float32 but fewer mantissa bits. fp16 has the same
+mantissa count as bfloat16 but a much smaller exponent range. Why does that make bf16 safer
+for training than fp16, even though they have the same total bit width?
+\answerspace[3]
+\end{exercise}
+
+\subsection{pmap vs pjit vs shard\_map}
 
 This project uses \texttt{pmap} exclusively, because we only ever do \emph{pure data
 parallelism}: the same model on every device. \texttt{pjit} (and its successor
-\texttt{shard\_map}) is the right tool when you need \emph{tensor parallelism} (a single layer
-split across devices) or \emph{pipeline parallelism}. Our ViT-Small fits in one TPU chip's
-HBM, so model parallelism would be gratuitous.
+\texttt{shard\_map}) is the right tool when you need \emph{tensor parallelism} (a single
+layer split across devices) or \emph{pipeline parallelism}. Our ViT-Small fits in a single
+TPU chip's HBM, so model parallelism would be gratuitous.
 
 \subsection{Spot/preemption}
 
-v6e-8 spot VMs cost roughly one third of on-demand (\$1.26/hr vs \$4.21/hr as of this writing)
-but can be \emph{preempted} at any time: GCP reclaims the hardware, the VM transitions to
-\texttt{PREEMPTED}, and your process is gone. This hit us during initial setup, once. Mitigation
-in practice: either use on-demand for long runs, or use \texttt{gcloud alpha compute tpus
-queued-resources} to auto-retry until capacity returns.
+v6e-8 spot VMs cost roughly one third of on-demand ($\sim$\$1.26/hr vs \$4.21/hr) but can be
+\emph{preempted} at any time: GCP reclaims the hardware, the VM transitions to
+\texttt{PREEMPTED}, your process is gone. Mitigation in practice:
+\begin{itemize}
+    \item Use on-demand for long (overnight) runs.
+    \item Use \texttt{gcloud alpha compute tpus queued-resources} to auto-retry until
+          capacity returns.
+    \item Checkpoint model state to Cloud Storage between epochs; any run that isn't
+          checkpointed pays the ``preempted = start over'' tax.
+\end{itemize}
+
+\begin{exercise}[Economics, \stars{1}]
+A 2-hour training run at v6e-8 spot is \$2.52. If the VM has a 20\% chance of being
+preempted per run and you restart from scratch on preemption, what is the expected total
+cost to complete the run? (Assume preemptions are memoryless.)
+\answerspace[3]
+\end{exercise}
 
 % =========================================================================
-\section{Running it}
+\section{Running the project}
 % =========================================================================
 
-Local laptop (CPU) or single GPU:
 \begin{lstlisting}[style=sh]
-bash scripts/setup.sh                    # detects hardware, installs jax build
+# Local laptop (CPU or single GPU)
+bash scripts/setup.sh
 python main.py --experiment train --batch_size 128 --epochs 2
-\end{lstlisting}
 
-GCP TPU v6e-8:
-\begin{lstlisting}[style=sh]
+# GCP TPU v6e-8 end-to-end
 gcloud compute tpus tpu-vm create vit-training \
     --zone=us-central1-b --accelerator-type=v6e-8 \
     --version=v2-alpha-tpuv6e --spot
@@ -544,51 +927,113 @@ gcloud compute tpus tpu-vm ssh vit-training --zone=us-central1-b \
 gcloud compute tpus tpu-vm ssh vit-training --zone=us-central1-b \
     --command="cd ~/vit-jax-distributed-scaling && bash scripts/run_gcp_tpu.sh"
 
-# Remember to delete afterwards --- spot VM keeps billing until you do.
+# Remember: spot VM keeps billing until you delete it.
 gcloud compute tpus tpu-vm delete vit-training --zone=us-central1-b
 \end{lstlisting}
 
-% =========================================================================
-\section{What to look at in the outputs}
-% =========================================================================
+\subsection{Output files}
 
-Every run writes three files to \texttt{--output\_dir}:
+Each run writes:
 
 \begin{itemize}
-\item \texttt{step\_metrics.csv} --- one row per logged step: loss, accuracy, step time.
-\item \texttt{epoch\_metrics.csv} --- one row per epoch: aggregated train + test metrics.
-\item \texttt{training\_log.json} --- config, metadata, and all step/epoch logs.
+\item \texttt{step\_metrics.csv} --- per-step: loss, accuracy, step time.
+\item \texttt{epoch\_metrics.csv} --- per-epoch: aggregated train + test metrics.
+\item \texttt{training\_log.json} --- config + metadata + all logs.
 \end{itemize}
 
-Each experiment adds plots:
-
+Plus experiment-specific plots:
 \begin{itemize}
 \item Scaling: \texttt{throughput\_vs\_devices.png}, \texttt{step\_time\_vs\_devices.png},
       \texttt{scaling\_efficiency\_vs\_devices.png}.
 \item Straggler: \texttt{step\_time\_comparison.png}, \texttt{slowdown\_vs\_delay.png}.
 \end{itemize}
 
-The scaling-efficiency plot is the most interpretable single number: a flat line near $1.0$
-means your distributed setup is not losing throughput to communication; a downward slope means
-it is.
-
 % =========================================================================
-\section{Further reading and things to try}
+\section{Where to go next}
 % =========================================================================
 
-\begin{itemize}
-\item \textbf{Swap CIFAR for something bigger.} Imagenette or Tiny-ImageNet will push per-step
-      compute higher, making the all-reduce overhead relatively smaller and the scaling
-      efficiency closer to $1.0$. A useful contrast to run.
-\item \textbf{Try \texttt{pjit}/\texttt{shard\_map}.} Port the same model to \texttt{jit} + a
-      SPMD mesh; you will see near-identical throughput for pure data parallelism but cleaner
-      code.
-\item \textbf{Compute-communication overlap.} Look at what happens if you replace
-      \texttt{pmean(grads)} with a manual \texttt{psum} and start the all-reduce asynchronously
-      during the optimizer step.
-\item \textbf{Real straggler sources.} Replace the synthetic \texttt{fori\_loop} with a
-      \texttt{jax.lax.while\_loop} keyed on a random per-device delay, to see the effect of
-      \emph{variance} in per-device times rather than a constant straggler.
+\begin{lab}[Your own extension]
+Pick \emph{one} of the following and actually do it. The goal is to make the repo yours,
+not to prove you can follow instructions.
+\begin{itemize}[leftmargin=*, itemsep=2pt]
+\item \textbf{Bigger dataset.} Swap CIFAR-100 for Imagenette. Per-step compute goes up, so
+      scaling efficiency should rise too. Predict first.
+\item \textbf{Port to shard\_map.} Rewrite the training step using
+      \texttt{jax.experimental.shard\_map}. Compare throughput against the pmap version.
+\item \textbf{Overlap communication with compute.} Replace \texttt{pmean(grads)} with a
+      manual \texttt{psum} and arrange for the all-reduce to overlap with the optimizer step.
+\item \textbf{Variable stragglers.} Replace the constant \texttt{fori\_loop} with a
+      random per-device delay each step. Does variance hurt more than a constant straggler?
+\item \textbf{Real checkpointing.} Save/load model state to Cloud Storage so a preempted
+      run can resume instead of restarting.
 \end{itemize}
+\end{lab}
+
+% =========================================================================
+\appendix
+\section{Selected solutions}
+% =========================================================================
+
+\paragraph{Exercise 1.1 (per-device arithmetic).}
+Each chip sees $512 / 8 = 64$ images per step. One epoch is
+$\lfloor 50000 / 512 \rfloor = 97$ steps (the ragged tail is dropped).
+
+\paragraph{Exercise 1.2 (first-step cost).}
+XLA traces the pmap'd function, lowers it to HLO, runs passes, and compiles to a TPU
+executable on the first call. The compiled graph is cached for the rest of the run, so
+subsequent steps are $\sim$2000$\times$ faster.
+
+\paragraph{Exercise 2.1 (token bookkeeping).}
+$(64/4)^2 = 256$ patches. Including \texttt{[CLS]}, 257 tokens.
+
+\paragraph{Exercise 3.1 (sharded shapes).}
+\texttt{image} becomes \texttt{(8, 128, 32, 32, 3)};
+\texttt{label} becomes \texttt{(8, 128)}.
+
+\paragraph{Exercise 3.3 (why \texttt{copy()}).}
+\texttt{\_augment\_batch} flips images in-place via \texttt{images[flip\_mask] = images[flip\_mask, :, ::-1, :]}.
+Without \texttt{copy}, that mutation writes back into the original dataset array and the
+augmentation becomes cumulative across epochs.
+
+\paragraph{Exercise 4.1 (input/output shapes).}
+Each device sees \texttt{(64, 128)}. The caller sees \texttt{(8, 64, 128)}.
+
+\paragraph{Exercise 4.2 (forget pmean).}
+Every device trains on its own slice with its own independent gradients. Eight different
+parameter copies diverge. You're effectively running eight independent models that pretend
+to share weights but don't; the training is meaningless.
+
+\paragraph{Exercise 4.3 (NaN on one device).}
+\texttt{pmean} averages, so \texttt{mean(finite, finite, ..., NaN) = NaN}. Every device
+receives a NaN update, corrupting all copies of the parameters. This is why production
+training almost always uses gradient clipping and NaN checks.
+
+\paragraph{Exercise 5.2 (why split keys).}
+If every device uses the same \texttt{step\_rng}, dropout masks are identical across
+devices. Effectively you reduce the dropout noise seen by the model by a factor of
+$\sqrt{N}$ --- the gradient estimate is averaged over $N$ \emph{correlated} samples, not
+$N$ independent ones. You can detect this by measuring train loss variance across steps
+with vs.\ without per-device keys.
+
+\paragraph{Exercise 6.1 (efficiency is bandwidth-bound).}
+$C$ scales roughly linearly with model size. $R(k)$ also scales with parameter count (all-reduce
+traffic = number of parameters). Whether efficiency goes up depends on which grows faster;
+typically for transformer-style models $C$ wins, so efficiency rises with model size.
+
+\paragraph{Exercise 7.1 (lax.cond vs Python if).}
+\texttt{device\_idx} inside pmap is a \emph{traced} JAX value, not a concrete Python int.
+A Python \texttt{if} tries to branch on it at trace time and fails with \texttt{ConcretizationTypeError}.
+\texttt{jax.lax.cond} compiles to a runtime branch inside the XLA program.
+
+\paragraph{Exercise 8.1 (bf16 vs fp16).}
+bf16's 8-bit exponent matches float32's range, so gradients don't underflow or overflow
+during training. fp16's 5-bit exponent needs dynamic loss-scaling tricks to avoid underflow
+on small gradients. bf16 essentially drops mantissa precision (which matmul accumulators
+paper over); fp16 drops range, which is harder to compensate for.
+
+\paragraph{Exercise 8.2 (preemption economics).}
+Expected cost per attempt is \$2.52; expected number of attempts until success is $1/0.8 = 1.25$.
+Expected cost is \$2.52 \emph{for the successful run} plus $0.2 \times \$2.52 \times \text{(expected attempts before success)} = 0.2/0.8 \times \$2.52 = \$0.63$
+for the wasted preempted attempts. Total expected cost: \$3.15.
 
 \end{document}
