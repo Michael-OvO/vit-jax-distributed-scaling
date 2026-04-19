@@ -1,0 +1,17 @@
+# Core ML stack (platform-neutral — JAX is installed by scripts/setup.sh with
+# the correct accelerator backend for the detected host: TPU, CUDA, or CPU).
+flax>=0.8.0
+optax>=0.1.7
+
+# Data
+tensorflow-datasets>=4.9.0
+tensorflow-cpu>=2.15.0
+
+# Metrics and visualization
+matplotlib>=3.7.0
+pandas>=2.0.0
+
+# Utilities
+absl-py>=1.4.0
+tqdm>=4.65.0
+numpy>=1.24.0

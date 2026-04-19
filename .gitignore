@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Outputs
+outputs/
+results/
+
+# Data cache
+tensorflow_datasets/
+
+# Claude Code / agent runtime state
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
