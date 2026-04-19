@@ -24,6 +24,7 @@ from vit_jax_distributed.distributed.parallel import (
 from vit_jax_distributed.utils.logging import MetricsLogger
 from vit_jax_distributed.utils.timing import Timer, StepTimer
 from vit_jax_distributed.utils.config import config_to_dict
+from vit_jax_distributed.utils.checkpoint import save_replicated
 
 logger = logging.getLogger(__name__)
 
@@ -300,6 +301,20 @@ def train(config):
                 f"train_loss={avg_epoch_loss:.4f}  "
                 f"train_acc={avg_epoch_acc:.4f}"
             )
+
+            # --- Checkpoint after each epoch ---
+            checkpoint_path = save_replicated(
+                state,
+                output_dir,
+                step=global_step,
+                metadata={
+                    "epoch": epoch + 1,
+                    "total_epochs": config.epochs,
+                    "config": config_dict,
+                    "epoch_metrics": epoch_metrics,
+                },
+            )
+            print(f"  Checkpoint saved: {checkpoint_path}")
 
     total_wall_time = wall_timer.elapsed
 
