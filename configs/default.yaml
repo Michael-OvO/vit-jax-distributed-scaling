@@ -1,0 +1,37 @@
+# ============================================================
+# Default configuration for JAX Distributed ViT Training
+# ============================================================
+# This file documents the default values used by the argparse
+# CLI in vit_jax_distributed/utils/config.py. Pass overrides
+# as command-line flags, e.g.:
+#   python main.py --batch_size 256 --epochs 50
+# ============================================================
+
+# --- Training hyper-parameters ---
+batch_size: 512
+epochs: 20
+learning_rate: 1.0e-3
+weight_decay: 0.01
+warmup_steps: 500
+
+# --- Model architecture (ViT-Small for CIFAR-100) ---
+image_size: 32
+patch_size: 4
+num_layers: 8
+hidden_dim: 384
+num_heads: 6
+mlp_dim: 768
+dropout_rate: 0.1
+
+# --- Experiment settings ---
+seed: 42
+output_dir: "./outputs"
+experiment: "train"          # choices: train, scaling, straggler
+num_devices: 0               # 0 = use all available
+precision: "fp32"            # choices: fp32, bf16
+straggler_delay: 1000        # iterations of dummy work for straggler sim
+
+# --- Logging / evaluation ---
+log_every: 50                # steps between logging
+eval_every: 1                # epochs between evaluation
+data_augmentation: true
