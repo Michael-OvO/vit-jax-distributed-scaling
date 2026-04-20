@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="outputs/header.png" alt="ViT-JAX Distributed Scaling — data-parallel ViT-Small on TPU v6e-8, with scaling and straggler results summarised" width="100%"/>
+</p>
+
 # ViT-JAX Distributed Scaling
 
 > **Final project — CS 390: Distributed Systems · Duke University · Spring 2026**
