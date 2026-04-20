@@ -1,0 +1,70 @@
+==================================================
+Seed 0
+==================================================
+No --image provided; sampled CIFAR-100 test image (true class: 'tiger').
+
+Top-5 predictions:
+   1. tiger               p = 0.9590  <-- true class
+   2. squirrel            p = 0.0211
+   3. cup                 p = 0.0091
+   4. wolf                p = 0.0034
+   5. crocodile           p = 0.0020
+
+CORRECT: model predicts 'tiger'; truth is 'tiger'.
+
+==================================================
+Seed 1
+==================================================
+No --image provided; sampled CIFAR-100 test image (true class: 'spider').
+
+Top-5 predictions:
+   1. trout               p = 0.5049
+   2. boy                 p = 0.1622
+   3. wolf                p = 0.1248
+   4. girl                p = 0.0871
+   5. spider              p = 0.0444  <-- true class
+
+WRONG: model predicts 'trout'; truth is 'spider'.
+
+==================================================
+Seed 2
+==================================================
+No --image provided; sampled CIFAR-100 test image (true class: 'squirrel').
+
+Top-5 predictions:
+   1. plate               p = 0.3945
+   2. orchid              p = 0.3471
+   3. road                p = 0.0544
+   4. rose                p = 0.0275
+   5. lobster             p = 0.0261
+
+WRONG: model predicts 'plate'; truth is 'squirrel'.
+
+==================================================
+Seed 3
+==================================================
+No --image provided; sampled CIFAR-100 test image (true class: 'bus').
+
+Top-5 predictions:
+   1. porcupine           p = 0.4004
+   2. turtle              p = 0.2613
+   3. pickup_truck        p = 0.0990
+   4. tank                p = 0.0706
+   5. oak_tree            p = 0.0632
+
+WRONG: model predicts 'porcupine'; truth is 'bus'.
+
+==================================================
+Seed 4
+==================================================
+No --image provided; sampled CIFAR-100 test image (true class: 'lawn_mower').
+
+Top-5 predictions:
+   1. couch               p = 0.4813
+   2. raccoon             p = 0.1726
+   3. lamp                p = 0.1385
+   4. rabbit              p = 0.0412
+   5. telephone           p = 0.0348
+
+WRONG: model predicts 'couch'; truth is 'lawn_mower'.
+
