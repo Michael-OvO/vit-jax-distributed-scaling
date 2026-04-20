@@ -25,8 +25,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from vit_jax_distributed.data.cifar100 import _load_split, CIFAR100_MEAN, CIFAR100_STD
-
 
 CIFAR100_CLASSES = [
     "apple", "aquarium_fish", "baby", "bear", "beaver", "bed", "bee", "beetle",
@@ -48,10 +46,27 @@ CIFAR100_CLASSES = [
 assert len(CIFAR100_CLASSES) == 100
 
 
-def _un_standardise(std_img: np.ndarray) -> np.ndarray:
-    """Reverse CIFAR mean/std standardisation, clipping to [0, 1]."""
-    arr = std_img * CIFAR100_STD + CIFAR100_MEAN
-    return np.clip(arr, 0.0, 1.0)
+def _load_display_images(images_npz: str | None) -> np.ndarray:
+    """Return (10000, 32, 32, 3) float32 in [0, 1] ready for matplotlib.
+
+    Prefers a local uint8 NPZ if provided (no tfds dependency). Otherwise
+    falls back to importing the training data pipeline (which requires
+    ``tensorflow-datasets``).
+    """
+    if images_npz is not None:
+        data = np.load(images_npz)
+        imgs = data["images"]
+        if imgs.dtype == np.uint8:
+            return imgs.astype(np.float32) / 255.0
+        return np.clip(imgs, 0.0, 1.0)
+
+    # Fallback: let the training pipeline load + standardise via tfds,
+    # then invert the standardisation for display.
+    from vit_jax_distributed.data.cifar100 import (
+        _load_split, CIFAR100_MEAN, CIFAR100_STD,
+    )
+    std_imgs, _ = _load_split("test")
+    return np.clip(std_imgs * CIFAR100_STD + CIFAR100_MEAN, 0.0, 1.0)
 
 
 def _short_label(name: str, max_len: int = 12) -> str:
@@ -62,12 +77,18 @@ def _short_label(name: str, max_len: int = 12) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("predictions_npz")
-    parser.add_argument("--output", default="inference_thumbnails.png")
+    parser.add_argument("--output", default=None,
+                        help="Output PNG path; if omitted, writes "
+                             "inference_thumbnails.png next to the NPZ.")
     parser.add_argument("--rows", type=int, default=4)
     parser.add_argument("--cols", type=int, default=6)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--mix", action="store_true", default=True,
                         help="Half correct, half wrong (default: on)")
+    parser.add_argument("--images_npz", default=None,
+                        help="Path to uint8 NPZ of raw CIFAR-100 test images "
+                             "(keys: 'images', 'labels'). If omitted, loads "
+                             "via tensorflow-datasets.")
     args = parser.parse_args()
 
     data = np.load(args.predictions_npz)
@@ -77,8 +98,7 @@ def main() -> None:
     probs = data["top5_probs"]
 
     print("Loading CIFAR-100 test images for display...")
-    images_std, _ = _load_split("test")
-    images = _un_standardise(images_std)
+    images = _load_display_images(args.images_npz)
 
     correct_mask = (pred == true)
     n_cells = args.rows * args.cols
@@ -142,10 +162,13 @@ def main() -> None:
         fontsize=11, y=0.995,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.97])
-    output_path = args.output
-    if not os.path.isabs(output_path):
-        output_path = os.path.join(os.path.dirname(os.path.abspath(args.predictions_npz)),
-                                   output_path)
+    if args.output is None:
+        output_path = os.path.join(
+            os.path.dirname(os.path.abspath(args.predictions_npz)),
+            "inference_thumbnails.png",
+        )
+    else:
+        output_path = os.path.abspath(args.output)
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved {output_path}")
