@@ -1,0 +1,6 @@
+{
+  "top1_accuracy": 0.5504,
+  "top5_accuracy": 0.8018,
+  "num_test": 10000,
+  "checkpoint": "/home/michael/outputs/trained_100/checkpoint_latest.msgpack"
+}
