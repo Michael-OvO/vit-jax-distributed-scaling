@@ -1,125 +1,196 @@
-"""Render a wide README header banner that summarises the project visually.
+"""Render a clean, symbolic README header banner.
 
-Combines the title + author + headline metrics (left) with miniature versions
-of the scaling-efficiency and straggler-slowdown plots (right), reading the
-underlying numbers directly from the CSVs so the banner stays in sync with
-whatever latest run is committed.
+Left:  a schematic of the 8-chip TPU mesh synchronising into one ViT model.
+Right: six real CIFAR-100 test images with their true class labels, loaded
+       from the committed ``outputs/cifar100_test_raw.npz``.
 
+No metrics, no table text --- purely a visual of *what this project is*.
 Output: ``outputs/header.png``.
 """
 
 from __future__ import annotations
 
-import csv
 import os
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.gridspec import GridSpec
+import numpy as np
+from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
+from matplotlib.patches import FancyBboxPatch
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+CIFAR100_CLASSES = [
+    "apple", "aquarium_fish", "baby", "bear", "beaver", "bed", "bee", "beetle",
+    "bicycle", "bottle", "bowl", "boy", "bridge", "bus", "butterfly", "camel",
+    "can", "castle", "caterpillar", "cattle", "chair", "chimpanzee", "clock",
+    "cloud", "cockroach", "couch", "crab", "crocodile", "cup", "dinosaur",
+    "dolphin", "elephant", "flatfish", "forest", "fox", "girl", "hamster",
+    "house", "kangaroo", "keyboard", "lamp", "lawn_mower", "leopard", "lion",
+    "lizard", "lobster", "man", "maple_tree", "motorcycle", "mountain",
+    "mouse", "mushroom", "oak_tree", "orange", "orchid", "otter", "palm_tree",
+    "pear", "pickup_truck", "pine_tree", "plain", "plate", "poppy",
+    "porcupine", "possum", "rabbit", "raccoon", "ray", "road", "rocket",
+    "rose", "sea", "seal", "shark", "shrew", "skunk", "skyscraper", "snail",
+    "snake", "spider", "squirrel", "streetcar", "sunflower", "sweet_pepper",
+    "table", "tank", "telephone", "television", "tiger", "tractor", "train",
+    "trout", "tulip", "turtle", "wardrobe", "whale", "willow_tree", "wolf",
+    "woman", "worm",
+]
+assert len(CIFAR100_CLASSES) == 100
 
-def _read_csv(rel_path: str) -> list[dict]:
-    with open(os.path.join(ROOT, rel_path)) as f:
-        return list(csv.DictReader(f))
+# One visually distinctive example per broad category.
+SHOWCASE_CLASSES = ["tiger", "sunflower", "bus", "skyscraper", "mushroom", "road"]
+
+
+def _pick_indices(labels: np.ndarray, class_names: list[str], seed: int = 42) -> list[int]:
+    rng = np.random.RandomState(seed)
+    picks = []
+    for name in class_names:
+        cls = CIFAR100_CLASSES.index(name)
+        matches = np.where(labels == cls)[0]
+        picks.append(int(rng.choice(matches)))
+    return picks
+
+
+def _device_box(ax, x: float, y: float, label: str,
+                fill: str = "#dbeafe", edge: str = "#2563eb") -> None:
+    w, h = 0.95, 0.75
+    ax.add_patch(
+        FancyBboxPatch(
+            (x, y), w, h,
+            boxstyle="round,pad=0.02,rounding_size=0.12",
+            edgecolor=edge, facecolor=fill, linewidth=1.4,
+        )
+    )
+    ax.text(x + w / 2, y + h / 2, label,
+            ha="center", va="center",
+            fontsize=10, color=edge, fontweight="bold",
+            family="DejaVu Sans")
+
+
+def _model_box(ax, x: float, y: float, w: float, h: float, label: str) -> None:
+    ax.add_patch(
+        FancyBboxPatch(
+            (x, y), w, h,
+            boxstyle="round,pad=0.02,rounding_size=0.12",
+            edgecolor="#0f172a", facecolor="#0f172a", linewidth=1.5,
+        )
+    )
+    ax.text(x + w / 2, y + h / 2, label,
+            ha="center", va="center",
+            fontsize=12, color="white", fontweight="bold",
+            family="DejaVu Sans")
+
+
+def _draw_schematic(ax) -> None:
+    ax.axis("off")
+    ax.set_xlim(0, 10)
+    ax.set_ylim(0, 7)
+    ax.set_aspect("equal")
+
+    # 8 TPU chips arranged in a 2x4 grid, reflecting the actual v6e-8 topology.
+    chip_x0 = 1.3
+    chip_y_top = 5.2
+    chip_y_bot = 4.1
+    col_w = 1.15
+    chip_positions = []
+    for col in range(4):
+        x = chip_x0 + col * col_w
+        _device_box(ax, x, chip_y_top, f"T{col}")
+        _device_box(ax, x, chip_y_bot, f"T{col + 4}")
+        chip_positions.append((x + 0.475, chip_y_bot))  # bottom centre of each column
+
+    # A single model box below, representing the replicated ViT after all-reduce.
+    model_x, model_y = 2.7, 1.3
+    model_w, model_h = 4.6, 1.4
+    _model_box(ax, model_x, model_y, model_w, model_h, "ViT-Small  (replicated)")
+
+    # Converging arrows from every chip column down to the model's top edge.
+    target_x_left = model_x + model_w * 0.35
+    target_x_right = model_x + model_w * 0.65
+    for i, (cx, cy) in enumerate(chip_positions):
+        # Split the arrows so they visually funnel into the model.
+        tx = target_x_left if i < 2 else target_x_right
+        ax.annotate(
+            "",
+            xy=(tx, model_y + model_h),
+            xytext=(cx, cy),
+            arrowprops=dict(
+                arrowstyle="-",
+                color="#94a3b8",
+                lw=1.0,
+                alpha=0.55,
+            ),
+        )
+    # Single bold sync arrow marking the all-reduce point.
+    ax.annotate(
+        "",
+        xy=(model_x + model_w / 2, model_y + model_h + 0.02),
+        xytext=(model_x + model_w / 2, chip_y_bot - 0.05),
+        arrowprops=dict(arrowstyle="-|>", color="#2563eb", lw=2.2,
+                        mutation_scale=16),
+    )
+    ax.text(
+        model_x + model_w / 2 + 0.15, (chip_y_bot + model_y + model_h) / 2 - 0.05,
+        "pmean\nall-reduce",
+        ha="left", va="center", fontsize=9, color="#2563eb",
+        fontweight="bold",
+    )
+
+    # Discreet caption.
+    ax.text(
+        5.0, 6.45, "8 TPU v6e chips  ·  synchronous data parallelism",
+        ha="center", va="bottom", fontsize=11, color="#475569",
+        style="italic",
+    )
+
+
+def _draw_thumbnails(fig, spec, images: np.ndarray, labels: np.ndarray,
+                     indices: list[int]) -> None:
+    inner = GridSpecFromSubplotSpec(
+        2, len(indices), subplot_spec=spec, wspace=0.18, hspace=0.05,
+        height_ratios=[0.9, 0.08],
+    )
+    for i, idx in enumerate(indices):
+        ax = fig.add_subplot(inner[0, i])
+        ax.imshow(images[idx], interpolation="nearest")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_edgecolor("#cbd5e1")
+            spine.set_linewidth(1.2)
+
+        label_ax = fig.add_subplot(inner[1, i])
+        label_ax.axis("off")
+        name = CIFAR100_CLASSES[int(labels[idx])].replace("_", " ")
+        label_ax.text(0.5, 0.6, name,
+                      ha="center", va="top", fontsize=11,
+                      color="#334155", family="DejaVu Sans")
 
 
 def main() -> None:
-    scaling = _read_csv("outputs/scaling/scaling_results.csv")
-    straggler = _read_csv("outputs/straggler/straggler_results.csv")
+    npz_path = os.path.join(ROOT, "outputs", "cifar100_test_raw.npz")
+    data = np.load(npz_path)
+    images = data["images"]
+    labels = data["labels"]
 
-    devices = [int(r["num_devices"]) for r in scaling]
-    efficiency = [float(r["scaling_efficiency"]) for r in scaling]
+    indices = _pick_indices(labels, SHOWCASE_CLASSES, seed=3)
 
-    # Straggler CSV has a baseline row where ``delay_iterations`` is empty.
-    delays = [int(r["delay_iterations"]) for r in straggler if r["delay_iterations"]]
-    slowdowns = [float(r["slowdown_factor"]) for r in straggler if r["delay_iterations"]]
-
-    fig = plt.figure(figsize=(16, 4.5), facecolor="white")
-    gs = GridSpec(
-        1, 3, width_ratios=[2.1, 1.0, 1.0], figure=fig,
-        left=0.02, right=0.98, top=0.92, bottom=0.14, wspace=0.28,
+    fig = plt.figure(figsize=(15, 3.6), facecolor="white")
+    outer = GridSpec(
+        1, 2, width_ratios=[2.1, 3.0], figure=fig,
+        left=0.015, right=0.985, top=0.96, bottom=0.08, wspace=0.07,
     )
 
-    # ---- Title column ----
-    ax_title = fig.add_subplot(gs[0, 0])
-    ax_title.axis("off")
-
-    ax_title.text(
-        0.02, 0.88,
-        "ViT-JAX Distributed Scaling",
-        fontsize=30, fontweight="bold", color="#0f172a",
-        va="top", ha="left",
-    )
-    ax_title.text(
-        0.02, 0.63,
-        "Data-parallel Vision Transformer on TPU v6e-8",
-        fontsize=15, color="#475569", va="top", ha="left", style="italic",
-    )
-
-    # Headline metric strip
-    metrics = [
-        ("55.04%", "top-1 test acc"),
-        ("80.18%", "top-5 test acc"),
-        ("3.33x",  "straggler slowdown"),
-        ("15K/s",  "throughput (imgs)"),
-    ]
-    for i, (value, label) in enumerate(metrics):
-        x = 0.025 + i * 0.235
-        ax_title.text(
-            x, 0.38, value,
-            fontsize=22, fontweight="bold", color="#2563eb",
-            va="top", ha="left", family="DejaVu Sans",
-        )
-        ax_title.text(
-            x, 0.22, label,
-            fontsize=11, color="#64748b", va="top", ha="left",
-        )
-
-    ax_title.text(
-        0.02, 0.02,
-        "CS 390: Distributed Systems  ·  Duke University Spring 2026  ·  Jinao Wang",
-        fontsize=11, color="#94a3b8", va="bottom", ha="left",
-    )
-
-    # ---- Scaling efficiency mini-plot ----
-    ax_scale = fig.add_subplot(gs[0, 1])
-    ax_scale.plot(
-        devices, [e * 100 for e in efficiency],
-        "o-", linewidth=2.8, markersize=9, color="#2563eb",
-    )
-    ax_scale.axhline(100, color="#94a3b8", linestyle="--", linewidth=1)
-    ax_scale.set_xticks(devices)
-    ax_scale.set_ylim(0, 115)
-    ax_scale.set_xlabel("Devices", fontsize=11)
-    ax_scale.set_ylabel("Efficiency (%)", fontsize=11)
-    ax_scale.set_title("Scaling efficiency", fontsize=13, fontweight="bold", pad=8)
-    ax_scale.grid(True, alpha=0.25)
-    for spine in ("top", "right"):
-        ax_scale.spines[spine].set_visible(False)
-    ax_scale.tick_params(labelsize=10)
-
-    # ---- Straggler slowdown mini-plot ----
-    ax_strag = fig.add_subplot(gs[0, 2])
-    ax_strag.plot(
-        delays, slowdowns,
-        "o-", linewidth=2.8, markersize=9, color="#dc2626",
-    )
-    ax_strag.axhline(1.0, color="#94a3b8", linestyle="--", linewidth=1)
-    ax_strag.set_xscale("log")
-    ax_strag.set_xlabel("Delay iters (log)", fontsize=11)
-    ax_strag.set_ylabel("Slowdown (×)", fontsize=11)
-    ax_strag.set_title("Slowdown from 1 slow device", fontsize=13, fontweight="bold", pad=8)
-    ax_strag.grid(True, alpha=0.25)
-    for spine in ("top", "right"):
-        ax_strag.spines[spine].set_visible(False)
-    ax_strag.tick_params(labelsize=10)
+    ax_schema = fig.add_subplot(outer[0, 0])
+    _draw_schematic(ax_schema)
+    _draw_thumbnails(fig, outer[0, 1], images, labels, indices)
 
     output_path = os.path.join(ROOT, "outputs", "header.png")
-    fig.savefig(output_path, dpi=120, facecolor="white")
+    fig.savefig(output_path, dpi=150, facecolor="white")
     plt.close(fig)
     print(f"Saved {output_path}")
 
