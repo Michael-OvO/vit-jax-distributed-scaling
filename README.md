@@ -1,230 +1,309 @@
 # ViT-JAX Distributed Scaling
 
-Distributed data-parallel training of Vision Transformer (ViT-Small) on CIFAR-100 using JAX/Flax, with structured experiments for **scaling analysis** and **straggler simulation**.
+> **Final project — CS 390: Distributed Systems · Duke University · Spring 2026**
+> **Author:** Jinao Wang
 
-This is a systems-focused ML project: the goal is to understand distributed training behavior — synchronization overhead, throughput scaling, and the impact of slow workers — not just model accuracy.
+Distributed data-parallel training of a Vision Transformer (ViT-Small) on CIFAR-100 in
+JAX/Flax, with two structured experiments for **scaling analysis** and **straggler
+simulation** on Google Cloud TPUs.
 
-## Architecture
+This is a **systems-focused** ML project: the goal is to understand distributed training
+behaviour — synchronisation overhead, throughput scaling, and the impact of slow workers —
+not to set accuracy records on CIFAR-100.
+
+## Results at a glance
+
+Trained 100 epochs on a single TPU v6e-8 (8 chips, bf16) in **421 seconds**:
+
+| Metric | Value |
+|---|---|
+| Test accuracy (top-1) | **55.04 %** |
+| Test accuracy (top-5) | **80.18 %** |
+| Parameters | 9.55 M |
+| Sustained throughput | ≈ 15 000 imgs / sec |
+| Scaling efficiency, 1 → 8 chips (strong) | 100 % → 36 % |
+| Slowdown from one straggler device (200k-iter delay) | **3.33 ×** |
+
+![Scaling efficiency](outputs/scaling/scaling_efficiency_vs_devices.png)
+![Straggler slowdown](outputs/straggler/slowdown_vs_delay.png)
+
+## What's in the repo
 
 ```
 vit_jax_distributed/
-├── models/          # ViT-Small (Flax Linen)
-├── data/            # CIFAR-100 pipeline (TFDS → numpy)
-├── train/           # Training loop with metrics
-├── distributed/     # pmap, all-reduce, state replication
-├── experiments/     # Scaling + straggler benchmarks
-└── utils/           # Logging, timing, CLI config
+├── models/          ViT-Small (Flax Linen)
+├── data/            CIFAR-100 pipeline  (TFDS → numpy)
+├── distributed/     pmap, pmean all-reduce, train-state replication
+├── train/           Training loop with checkpointing
+├── experiments/     Scaling + straggler benchmarks
+└── utils/           Config, metrics logger, timers, checkpoint helpers
+main.py              CLI entry for train / scaling / straggler
+inference.py         Classify one image with a trained checkpoint
+scripts/
+├── setup.sh                    Host-detecting dependency install
+├── run_gcp_tpu.sh              One-shot TPU run (train + scaling + straggler)
+├── run_gcp_gpu.sh              Multi-GPU equivalent
+├── run_local.sh                Laptop smoke run
+├── full_test_eval.py           Full test-set eval → test_predictions.npz
+├── plot_training_curves.py     Train/test loss & accuracy over epochs
+├── plot_eval_results.py        Per-class accuracy bar + confusion matrix
+└── plot_inference_thumbnails.py  Grid of test images with top-3 predictions
+outputs/                      Plots, CSVs, JSON logs from published runs
 ```
 
-### Model
+## The model
 
 **ViT-Small** configured for 32×32 CIFAR images:
-- Patch size 4 → 64 patches per image
-- Hidden dim 384, 6 attention heads, 8 transformer blocks
-- ~6M parameters
-- Pre-norm architecture (LayerNorm before attention/MLP)
+- Patch size 4 → 64 patches per image, plus a learnable `[CLS]` token
+- 8 transformer blocks, hidden dim 384, 6 attention heads, MLP dim 768
+- Pre-norm (LayerNorm before attention / MLP) for training stability
+- ~9.5 M trainable parameters
 
-### Distributed Training Approach
+## Distributed training approach
 
-**Synchronous data parallelism** using `jax.pmap`:
+**Synchronous data parallelism** via `jax.pmap`:
 
-1. **Replicate** model parameters across all devices
-2. **Shard** each batch: `(B, H, W, C)` → `(num_devices, B/N, H, W, C)`
-3. **Compute** gradients independently on each device
-4. **All-reduce** gradients via `jax.lax.pmean(grads, axis_name='batch')`
-5. **Update** parameters identically on every device
+1. **Replicate** parameters across all devices.
+2. **Shard** each batch: `(B, H, W, C)` → `(num_devices, B/N, H, W, C)`.
+3. **Compute** gradients independently on each device.
+4. **All-reduce** gradients via `jax.lax.pmean(grads, axis_name='batch')`.
+5. **Update** parameters identically on every device.
 
-This is the standard data-parallel pattern. The `pmean` call triggers an all-reduce collective, which is the key synchronization point. Every device must reach this barrier before any can proceed — this is what makes stragglers costly.
+The `pmean` call is the synchronisation barrier. Every device must reach it before any can
+proceed — this is the mechanism the straggler experiment measures.
 
 ```
 Device 0: forward → backward → [pmean] → optimizer step
 Device 1: forward → backward → [pmean] → optimizer step
-Device 2: forward → backward → [pmean] → optimizer step
-Device 3: forward → backward → [pmean] → optimizer step
+       …
                                   ↑
                           all-reduce barrier
 ```
 
-### Experiments
+## Experiments
 
-**Scaling experiment**: Measures throughput (images/sec) and step time across device counts. Computes scaling efficiency relative to single-device baseline. Generates throughput, step time, and efficiency plots.
+### Scaling — throughput vs device count
+Sweeps `k ∈ {1, 2, 4, 8}` devices (holding the global batch fixed) and measures:
+- step time `T_k`
+- throughput `Θ_k = B / T_k`
+- scaling efficiency `η_k = Θ_k / (k · Θ_1)`
 
-**Straggler experiment**: Injects artificial compute delay on device 0 using `jax.lax.fori_loop` with dummy matrix multiplications, gated by `jax.lax.cond` on `axis_index`. Tests multiple delay magnitudes and measures the global slowdown factor.
+Plots: `outputs/scaling/throughput_vs_devices.png`,
+`step_time_vs_devices.png`, `scaling_efficiency_vs_devices.png`.
 
-## Quick Start
+### Straggler — one slow device, whole cluster pays
+Baseline vs. 5 injected compute delays on device 0. The delay is a
+`jax.lax.fori_loop` of real 512 × 512 matmuls, threaded through
+`jax.lax.optimization_barrier` so XLA cannot elide it. Reports the slowdown ratio.
 
-### Setup
+Plots: `outputs/straggler/step_time_comparison.png`,
+`slowdown_vs_delay.png`.
+
+## Quick start
+
+### Laptop (CPU or single GPU)
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/vit-jax-distributed-scaling.git
+git clone https://github.com/Michael-OvO/vit-jax-distributed-scaling.git
 cd vit-jax-distributed-scaling
-bash scripts/setup.sh
+bash scripts/setup.sh                 # creates a local venv, installs jax[cpu|cuda12]
+
+# Activate the venv (laptop only; TPU path uses pip --user, no venv).
 source venv/bin/activate
+
+python main.py --experiment train --batch_size 128 --epochs 2
 ```
 
-### Run Training
+### GCP TPU v6e-8 (what produced the published results)
 
 ```bash
-# Basic training (auto-detects devices)
-python main.py --experiment train --batch_size 512 --epochs 20
+gcloud compute tpus tpu-vm create vit-training \
+    --zone=us-central1-b --accelerator-type=v6e-8 \
+    --version=v2-alpha-tpuv6e --spot
 
-# Quick test run
-python main.py --experiment train --batch_size 128 --epochs 2 --output_dir ./outputs/test
+gcloud compute tpus tpu-vm ssh vit-training --zone=us-central1-b
+# --- inside the VM ---
+git clone https://github.com/Michael-OvO/vit-jax-distributed-scaling.git
+cd vit-jax-distributed-scaling
+bash scripts/setup.sh                 # installs jax[tpu] from Google's release bucket
+bash scripts/run_gcp_tpu.sh           # runs all three experiments, bf16
+
+# --- back on your laptop, when done ---
+gcloud compute tpus tpu-vm delete vit-training --zone=us-central1-b
 ```
 
-### Run Experiments
+The setup script detects TPU VMs via `/dev/accel*` and the `TPU_NAME` env var (no JAX
+required for the probe) and installs `jax[tpu]` **exactly once** so `pip install -r
+requirements.txt` afterwards cannot clobber it.
+
+### GCP multi-GPU VM
 
 ```bash
-# Scaling benchmark
-python main.py --experiment scaling --batch_size 512 --output_dir ./outputs/scaling
-
-# Straggler simulation
-python main.py --experiment straggler --batch_size 512 --output_dir ./outputs/straggler
-```
-
-## Running on GCP
-
-### Multi-GPU VM
-
-**Recommended**: `n1-standard-8` or `a2-highgpu-4g` with 4× NVIDIA T4/A100.
-
-```bash
-# SSH into VM
 gcloud compute ssh YOUR_VM_NAME --zone YOUR_ZONE
-
-# Clone and setup
-git clone https://github.com/YOUR_USERNAME/vit-jax-distributed-scaling.git
+git clone https://github.com/Michael-OvO/vit-jax-distributed-scaling.git
 cd vit-jax-distributed-scaling
-bash scripts/setup.sh
-source venv/bin/activate
-
-# Verify GPU detection
-python -c "import jax; print(jax.devices())"
-
-# Run all experiments
+bash scripts/setup.sh                 # installs jax[cuda12]
 bash scripts/run_gcp_gpu.sh
 ```
 
-The setup script auto-detects NVIDIA GPUs and installs `jax[cuda12]`. JAX sees all GPUs on the machine automatically — no `CUDA_VISIBLE_DEVICES` configuration needed.
-
-### TPU VM
-
-**Recommended**: `v2-8` or `v3-8` (8 TPU cores).
+## Running individual experiments
 
 ```bash
-# Create TPU VM
-gcloud compute tpus tpu-vm create vit-training \
-    --zone=us-central1-b \
-    --accelerator-type=v3-8 \
-    --version=tpu-ubuntu2204-base
+# Training with checkpointing (produces checkpoint_latest.msgpack each epoch)
+python main.py --experiment train --batch_size 1024 --epochs 100 \
+    --precision bf16 --output_dir outputs/training/100_epoch
 
-# SSH in
-gcloud compute tpus tpu-vm ssh vit-training --zone=us-central1-b
+# Scaling sweep
+python main.py --experiment scaling --batch_size 1024 \
+    --precision bf16 --output_dir outputs/scaling
 
-# Clone and setup
-git clone https://github.com/YOUR_USERNAME/vit-jax-distributed-scaling.git
-cd vit-jax-distributed-scaling
-bash scripts/setup.sh
-source venv/bin/activate
-
-# Verify TPU detection
-python -c "import jax; print(jax.devices())"
-# Should show 8 TpuDevice entries
-
-# Run all experiments with bf16 (native TPU precision)
-bash scripts/run_gcp_tpu.sh
+# Straggler sweep
+python main.py --experiment straggler --batch_size 1024 \
+    --precision bf16 --output_dir outputs/straggler
 ```
 
-The setup script detects the TPU runtime (via `/dev/accel*` or GCE TPU env vars — no prior JAX needed) and installs `jax[tpu]` from Google's release bucket. `requirements.txt` itself pins no JAX extra, so it will not clobber the TPU build when it runs next.
+### Inference against a trained checkpoint
 
-`--precision bf16` activates via `jax.config.update("jax_default_matmul_precision", "bfloat16")`: every matmul/einsum (Attention QKV, MLP, Dense head) runs in bf16 on the MXU while parameters and optimizer state stay in fp32. Expect ~2× step throughput versus fp32 on v2/v3 TPUs.
+```bash
+# Random CIFAR-100 test image (ground-truth known)
+python inference.py --checkpoint outputs/training/100_epoch/checkpoint_latest.msgpack
 
-### Key CLI Flags
+# Your own image
+python inference.py \
+    --checkpoint outputs/training/100_epoch/checkpoint_latest.msgpack \
+    --image path/to/photo.jpg
+```
+
+### Regenerating plots from saved artefacts
+
+```bash
+# Training curves from epoch_metrics.csv
+python scripts/plot_training_curves.py outputs/training/100_epoch/epoch_metrics.csv
+
+# Full-test eval on a TPU (requires a live VM)
+python scripts/full_test_eval.py \
+    --checkpoint outputs/training/100_epoch/checkpoint_latest.msgpack \
+    --output_dir outputs/training/100_epoch
+
+# Per-class accuracy + confusion matrix (works offline)
+python scripts/plot_eval_results.py outputs/training/100_epoch/test_predictions.npz
+
+# Inference thumbnails, fully offline (uses the raw CIFAR NPZ)
+python scripts/plot_inference_thumbnails.py \
+    outputs/training/100_epoch/test_predictions.npz \
+    --images_npz outputs/cifar100_test_raw.npz
+```
+
+## Key CLI flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--experiment` | `train` | `train`, `scaling`, or `straggler` |
 | `--batch_size` | `512` | Global batch size (split across devices) |
 | `--epochs` | `20` | Training epochs |
-| `--num_devices` | `0` | Device count (0 = all available) |
-| `--precision` | `fp32` | `fp32` or `bf16` |
-| `--straggler_delay` | `1000` | Dummy compute iterations for straggler |
-| `--output_dir` | `./outputs` | Where to save logs and plots |
-| `--learning_rate` | `1e-3` | Peak LR (with cosine warmup schedule) |
-| `--num_layers` | `8` | Transformer depth |
+| `--num_devices` | `0` | Device count (0 = use all available) |
+| `--precision` | `fp32` | `fp32` or `bf16` (TPU-native matmul) |
+| `--learning_rate` | `1e-3` | Peak LR with cosine warmup schedule |
+| `--output_dir` | `./outputs` | Where to save logs, plots, and checkpoints |
 | `--log_every` | `50` | Steps between log entries |
-| `--eval_every` | `1` | Epochs between test evaluation |
+| `--eval_every` | `1` | Epochs between test-set evaluation |
 
-See `configs/default.yaml` for all defaults.
+See [`configs/default.yaml`](configs/default.yaml) for the full list.
 
-## Output
+## Outputs
 
-Training produces:
+### Per training run
 - `step_metrics.csv` — per-step loss, accuracy, timing
 - `epoch_metrics.csv` — per-epoch train/test metrics
-- `training_log.json` — complete run metadata
+- `training_log.json` — config + metadata + all logs
+- `checkpoint_NNNNNN.msgpack` + `checkpoint_latest.msgpack` — model state
+- `checkpoint_latest.json` — step, epoch, and full config for the latest checkpoint
 
-Experiments produce:
-- `scaling_results.csv/json` + `throughput_vs_devices.png`, `step_time_vs_devices.png`, `scaling_efficiency_vs_devices.png`
-- `straggler_results.csv/json` + `step_time_comparison.png`, `slowdown_vs_delay.png`
+### Per experiment
+- Scaling: `scaling_results.csv/json` + three PNGs (throughput, step time, efficiency)
+- Straggler: `straggler_results.csv/json` + two PNGs (bar chart, log-x slowdown curve)
 
-## Expected Results
-
-### Scaling
-
-On a 4-GPU machine, expect:
-- Near-linear throughput scaling from 1→4 devices
-- Slight efficiency drop at higher device counts due to all-reduce overhead
-- Step time roughly constant (batch is split, not replicated)
-
-### Straggler Impact
-
-With synchronous data parallelism:
-- A single slow device forces **all** devices to wait at the all-reduce barrier
-- Slowdown is proportional to the straggler's delay
-- This demonstrates why async-SGD and straggler mitigation matter in production
-
-## Project Structure
+All published artefacts from the TPU v6e-8 run live under [`outputs/`](outputs/):
 
 ```
-.
-├── main.py                          # CLI entry point
-├── requirements.txt                 # Python dependencies
-├── configs/
-│   └── default.yaml                 # Documented defaults
-├── scripts/
-│   ├── setup.sh                     # Environment setup
-│   ├── run_local.sh                 # Local run
-│   ├── run_gcp_gpu.sh               # Multi-GPU run
-│   └── run_gcp_tpu.sh               # TPU run
-└── vit_jax_distributed/
-    ├── models/vit.py                # ViT-Small implementation
-    ├── data/cifar100.py             # CIFAR-100 data pipeline
-    ├── distributed/parallel.py      # pmap + all-reduce
-    ├── train/trainer.py             # Training loop
-    ├── experiments/
-    │   ├── scaling.py               # Scaling benchmark
-    │   └── straggler.py             # Straggler simulation
-    └── utils/
-        ├── config.py                # CLI configuration
-        ├── logging.py               # Metrics logger
-        └── timing.py                # Wall-clock timing
+outputs/
+├── cifar100_test_raw.npz       # 30 MB, uint8 test images for offline thumbnails
+├── scaling/                    # three PNGs + CSV
+├── straggler/                  # two PNGs + CSV
+└── training/
+    ├── 20_epoch/               # baseline run
+    └── 100_epoch/              # headline run + eval artefacts
+        ├── training_curves.png
+        ├── per_class_accuracy.png
+        ├── confusion_matrix.png
+        ├── inference_thumbnails.png
+        ├── inference_samples.txt
+        ├── test_predictions.npz
+        └── test_summary.json
 ```
 
-## Tech Stack
+## What the numbers say
 
-- **JAX** — XLA-compiled numerical computing with auto-differentiation
+**Strong scaling drops to 36 %** at 8 chips because per-device batch halves on every
+doubling — the MXU becomes starved of work and all-reduce overhead starts to dominate.
+Weak scaling (per-device batch fixed) would stay > 85 % here.
+
+**A single straggler device (200 k extra matmul iters) slows the entire 8-chip cluster
+by 3.33×**, dropping throughput from 19 800 img/s to 5 900 img/s. That's the cost of
+one bad chip in a nominally-healthy cluster — the classic argument for async-SGD,
+backup workers, and elastic training.
+
+**The model overfits after epoch ~33**: training loss keeps falling (to 0.03 at epoch
+100, i.e. 99 % train accuracy), but test loss bottoms at epoch 32 (1.93) and then
+climbs back to 2.72. Test accuracy still creeps upward to 55 % because the model grows
+more confident on the examples it was already getting right. See
+`outputs/training/100_epoch/training_curves.png`.
+
+**The model learned categories, not fine labels**: the top 5 most-common confusions
+are `maple_tree → oak_tree` (19×), `pine_tree → oak_tree` (17×), `oak_tree → maple_tree`
+(16×), `man → woman` (16×), `bus → pickup_truck` (14×). See the confusion matrix.
+
+## Design decisions
+
+1. **`pmap`, not `pjit`/`shard_map`.** For pure data parallelism, `pmap` is simpler and
+   more explicit. `pjit` is the right tool for *tensor* or *pipeline* parallelism, which
+   the 9.5 M-param model on a single chip's HBM does not need.
+
+2. **Numpy-only data pipeline.** After the initial TFDS load, augmentation and batching
+   are in-memory numpy operations. The full CIFAR-100 float32 train set is ~615 MB — fits
+   comfortably in RAM, and avoids the `tf.data` runtime overhead.
+
+3. **Straggler via real XLA compute, not `time.sleep`.** `time.sleep` is a Python call;
+   it doesn't run inside a pmap'd JIT program. We inject a `jax.lax.fori_loop` of
+   nonlinear 512×512 matmuls, threaded through `jax.lax.optimization_barrier`, so XLA's
+   algebraic simplifier and dead-code eliminator can't optimise it away. (An earlier
+   attempt with `a @ eye(64) + 0*a` was algebraically the identity and got completely
+   elided — the commit history has the fix.)
+
+4. **Device subsets threaded through `pmap`.** Every `pmap`, `eval_step`, and
+   `jax_utils.replicate` call in this repo accepts an explicit `devices=` list. Omitting
+   this breaks the scaling experiment on multi-device hosts, because `pmap` otherwise
+   silently binds to all local devices and the sharded batch's leading dimension fails
+   to match.
+
+5. **bf16 without parameter dtype changes.** `--precision bf16` flips
+   `jax_default_matmul_precision` to `bfloat16` globally. fp32 parameters and optimizer
+   state are preserved; only matmuls (Dense, attention QKV, einsum) downcast on the MXU.
+   Cheap and safe on v3/v6e TPUs — a ~2× step-time win.
+
+6. **Checkpointing via `flax.serialization`.** msgpack format; no orbax or
+   cloud-tpu-checkpoint dependency. One `checkpoint_latest.msgpack` + numbered history
+   per epoch, plus a sidecar JSON with the exact config so `inference.py` can rebuild
+   the model without any hand-passed hyper-parameters.
+
+## Tech stack
+
+- **JAX** — XLA-compiled numerical computing + autodiff
 - **Flax Linen** — Neural network modules
-- **Optax** — Optimizers (AdamW + cosine warmup schedule)
-- **TFDS** — Dataset loading (CIFAR-100)
-- **matplotlib** — Experiment plots
+- **Optax** — AdamW + cosine warmup decay
+- **TensorFlow-datasets** — CIFAR-100 loading (one-shot, then numpy)
+- **matplotlib** — All plots
 
-## Key Design Decisions
+## License
 
-1. **pmap over pjit**: For pure data parallelism, `pmap` is simpler and more explicit. `pjit` with sharding constraints is better for model parallelism, which isn't needed here.
-
-2. **numpy-only data pipeline**: After the initial TFDS load, all augmentation and batching uses numpy. This avoids TF runtime overhead and keeps the data path simple.
-
-3. **Straggler via XLA compute**: Rather than `time.sleep()` (which doesn't work inside `pmap`/XLA), we inject real matrix multiplications via `lax.fori_loop` + `lax.cond`. This creates genuine compute imbalance that the XLA scheduler can't optimize away.
-
-4. **Separate experiment configs**: Scaling and straggler experiments use dedicated dataclasses rather than the training config, keeping concerns separate while sharing the same model/data infrastructure.
+MIT.
