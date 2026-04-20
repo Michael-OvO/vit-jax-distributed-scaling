@@ -72,13 +72,34 @@ outputs/                      Plots, CSVs, JSON logs from published runs
 The `pmean` call is the synchronisation barrier. Every device must reach it before any can
 proceed — this is the mechanism the straggler experiment measures.
 
+### One training step, visualised
+
+```mermaid
+flowchart LR
+    Batch["Global batch<br/>B = 1024"] --> Shard["shard_batch<br/>(8, 128, 32, 32, 3)"]
+    Shard --> D0["Device 0<br/>forward → backward"]
+    Shard --> D1["Device 1<br/>forward → backward"]
+    Shard --> Dd["…"]
+    Shard --> D7["Device 7<br/>forward → backward"]
+    D0 --> PM(("pmean<br/>all-reduce barrier"))
+    D1 --> PM
+    Dd --> PM
+    D7 --> PM
+    PM --> Upd["apply_gradients<br/>(identical on every device)"]
+    Upd --> Next["Replicated state<br/>ready for next batch"]
+
+    classDef device fill:#e8f4ff,stroke:#3b82f6,color:#1e3a8a
+    classDef barrier fill:#fef3c7,stroke:#d97706,color:#7c2d12,font-weight:bold
+    classDef normal fill:#f5f5f5,stroke:#666,color:#111
+    class D0,D1,Dd,D7 device
+    class PM barrier
+    class Batch,Shard,Upd,Next normal
 ```
-Device 0: forward → backward → [pmean] → optimizer step
-Device 1: forward → backward → [pmean] → optimizer step
-       …
-                                  ↑
-                          all-reduce barrier
-```
+
+Every device has its own slice of the batch and computes its own local gradient; the
+`pmean` barrier averages them into one shared gradient, and the optimiser update then
+produces identical new parameters on every device. This keeps distributed training
+mathematically equivalent to training on a single device with the full global batch.
 
 ## Experiments
 
@@ -95,6 +116,31 @@ Plots: `outputs/scaling/throughput_vs_devices.png`,
 Baseline vs. 5 injected compute delays on device 0. The delay is a
 `jax.lax.fori_loop` of real 512 × 512 matmuls, threaded through
 `jax.lax.optimization_barrier` so XLA cannot elide it. Reports the slowdown ratio.
+
+The effect is the whole point of the experiment: one device runs its extra work while the
+other seven sit idle at the all-reduce barrier, waiting.
+
+```mermaid
+gantt
+    title Straggler step at delay = 200000 (measured: 172.6 ms vs 51.8 ms baseline → 3.33×)
+    dateFormat X
+    axisFormat %L
+    section Device 0 (straggler)
+    forward + backward       :done,    d0a, 0, 52
+    injected matmuls         :crit,    d0b, 52, 173
+    section Device 1
+    forward + backward       :done,    d1a, 0, 52
+    idle — waiting for D0    :active,  d1b, 52, 173
+    section Device 2
+    forward + backward       :done,    d2a, 0, 52
+    idle — waiting for D0    :active,  d2b, 52, 173
+    section Device ⋯
+    forward + backward       :done,    ddd1, 0, 52
+    idle — waiting for D0    :active,  ddd2, 52, 173
+    section Device 7
+    forward + backward       :done,    d7a, 0, 52
+    idle — waiting for D0    :active,  d7b, 52, 173
+```
 
 Plots: `outputs/straggler/step_time_comparison.png`,
 `slowdown_vs_delay.png`.
@@ -262,6 +308,71 @@ more confident on the examples it was already getting right. See
 **The model learned categories, not fine labels**: the top 5 most-common confusions
 are `maple_tree → oak_tree` (19×), `pine_tree → oak_tree` (17×), `oak_tree → maple_tree`
 (16×), `man → woman` (16×), `bus → pickup_truck` (14×). See the confusion matrix.
+
+## Classification examples
+
+### Sample predictions on the test set
+
+![Inference thumbnails](outputs/training/100_epoch/inference_thumbnails.png)
+
+24 random test images with the model's top-3 predictions under each tile. **Green**
+border = the model's top-1 was correct; **red** = wrong. Mixed intentionally
+(half-correct, half-wrong) so both the successes and the failure modes are visible.
+
+### Text transcript of five sample classifications
+
+Three are illustrative; the full five are in
+[`outputs/training/100_epoch/inference_samples.txt`](outputs/training/100_epoch/inference_samples.txt).
+
+```text
+Seed 0 — true class: tiger
+  1. tiger              p = 0.959  ← ✓ CORRECT, high confidence
+  2. squirrel           p = 0.021
+  3. cup                p = 0.009
+  4. wolf               p = 0.003
+  5. crocodile          p = 0.002
+
+Seed 3 — true class: bus
+  1. porcupine          p = 0.400
+  2. turtle             p = 0.261
+  3. pickup_truck       p = 0.099  ← fine class wrong, but "vehicle" is in top-3
+  4. tank               p = 0.071
+  5. oak_tree           p = 0.063
+
+Seed 1 — true class: spider
+  1. trout              p = 0.505
+  2. boy                p = 0.162
+  3. wolf               p = 0.125
+  4. girl               p = 0.087
+  5. spider             p = 0.044  ← true class barely in top-5
+```
+
+The tiger example is the confident, correct case. The bus example shows what "learned
+categories, not fine labels" means in practice — the top-1 is wildly wrong, but
+`pickup_truck` and `tank` are both vehicles in the top-5. The spider example is a
+genuine hallucination, the kind that limits an accuracy-from-scratch ceiling on 32×32
+thumbnails.
+
+### Per-class accuracy
+
+![Per-class accuracy](outputs/training/100_epoch/per_class_accuracy.png)
+
+All 100 CIFAR-100 fine classes ranked by test accuracy. The colour gradient from red to
+green tracks accuracy; the dashed line marks the 55.04 % overall mean.
+
+**Best** (distinct colours / shapes): `sunflower` 85 %, `skunk` 84 %, `orange` 84 %,
+`road` 84 %, `plain` 84 %.
+**Worst** (visually ambiguous fine categories): `seal` 24 %, `lizard` 30 %, `otter` 31 %,
+`man` 31 %, `turtle` 33 %.
+
+### Confusion matrix
+
+![Confusion matrix](outputs/training/100_epoch/confusion_matrix.png)
+
+Rows sum to 1 (probability of a predicted class given a true class). A perfect model
+would be a pure diagonal; ours is diagonal-heavy but with bright off-diagonal clusters
+exactly where related categories live — the three tree classes form a little cross in
+the bottom-right corner, for instance.
 
 ## Design decisions
 
