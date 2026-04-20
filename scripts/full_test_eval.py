@@ -23,7 +23,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from functools import partial
+
+# Make the project root importable when running as `python3 scripts/...`
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(_HERE))
 
 import jax
 import jax.numpy as jnp
