@@ -26,6 +26,9 @@ tensorflow_datasets/
 # Claude Code / agent runtime state
 .claude/
 
+# Private study notes (kept local; not part of the public repo)
+notes/
+
 # LaTeX build artefacts (keep .tex, ignore build output)
 *.aux
 *.log
@@ -34,6 +37,12 @@ tensorflow_datasets/
 *.synctex.gz
 *.fls
 *.fdb_latexmk
+*.nav
+*.snm
+*.vrb
+
+# Presenter scripts for slide decks (kept local; PDFs are the public artefact)
+slides/*_script.md
 
 # OS
 .DS_Store

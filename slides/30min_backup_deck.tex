@@ -1,0 +1,905 @@
+% !TEX program = pdflatex
+% =====================================================================
+%  ViT-JAX Distributed Scaling  —  30-minute Q&A backup deck
+%  Michael Wang  ·  Team Tensor  ·  CS 390: Distributed Systems  ·  Duke, Spring 2026
+%
+%  Purpose: to support an in-person 30-minute technical discussion with
+%           the professor.  Not for live presentation — every slide is
+%           self-contained and can be jumped to when a question lands.
+%
+%  Compile:  pdflatex 30min_backup_deck.tex   (run twice for TOC)
+% =====================================================================
+\documentclass[aspectratio=169,10pt]{beamer}
+
+\usetheme{metropolis}
+\usepackage{appendixnumberbeamer}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, shapes.geometric, fit, backgrounds, calc}
+
+\graphicspath{{../outputs/}{../outputs/scaling/}{../outputs/straggler/}%
+              {../outputs/training/100_epoch/}{../outputs/training/20_epoch/}}
+
+\definecolor{accent}{HTML}{2563EB}
+\definecolor{warn}{HTML}{D97706}
+\definecolor{muted}{HTML}{6B7280}
+\definecolor{ok}{HTML}{059669}
+\definecolor{codebg}{HTML}{F3F4F6}
+\setbeamercolor{alerted text}{fg=accent}
+
+\lstdefinestyle{py}{
+  basicstyle=\ttfamily\scriptsize,
+  backgroundcolor=\color{codebg},
+  keywordstyle=\color{accent}\bfseries,
+  stringstyle=\color{ok},
+  commentstyle=\color{muted}\itshape,
+  language=Python,
+  showstringspaces=false,
+  columns=fullflexible,
+  keepspaces=true,
+  frame=single,
+  rulecolor=\color{black!15},
+  xleftmargin=2pt, xrightmargin=2pt,
+  aboveskip=3pt, belowskip=3pt,
+  breaklines=true,
+}
+
+% Automatic section-intro slides
+\AtBeginSection[]{
+  \begin{frame}[plain,noframenumbering]
+    \vfill
+    \centering
+    \begin{beamercolorbox}[sep=8pt,center,rounded=true]{title}
+      \usebeamerfont{title}\insertsectionhead\par
+    \end{beamercolorbox}
+    \vfill
+  \end{frame}
+}
+
+\title{ViT-JAX Distributed Scaling}
+\subtitle{30-minute technical discussion — backup deck}
+\author{Michael Wang \\ \textit{\small Team Tensor}}
+\institute{CS 390 — Distributed Systems · Duke University}
+\date{Spring 2026}
+
+\begin{document}
+
+% =====================================================================
+\begin{frame}[plain]\titlepage\end{frame}
+
+% ---------------------------------------------------------------------
+\begin{frame}{How this deck is used}
+  \textbf{Purpose.} Reference material for a 30-minute technical discussion; not
+  a live presentation.
+  \vspace{0.4em}
+  \begin{itemize}
+    \item Each slide is \emph{self-contained}: I can jump to it when a question lands.
+    \item Numbers on this deck are the published TPU v6e-8 run
+          (seeds fixed, \texttt{outputs/} in the repo).
+    \item Code blocks are trimmed from the real source, not pseudo-code.
+  \end{itemize}
+  \vspace{0.6em}
+  \textbf{Roadmap.}
+  \begin{enumerate}\small
+    \item Motivation \& problem framing
+    \item Model \& data pipeline
+    \item Parallelism mechanics (\texttt{pmap}, \texttt{pmean}, replication)
+    \item Scaling deep-dive
+    \item Straggler deep-dive (incl.\ the XLA-elision bug)
+    \item Accuracy \& training analysis
+    \item Design decisions, limits, future work
+  \end{enumerate}
+\end{frame}
+
+\begin{frame}{Contents}\tableofcontents\end{frame}
+
+% =====================================================================
+\section{Motivation \& problem framing}
+
+\begin{frame}{What this project is (and isn't)}
+  \textbf{It is} a systems study of \emph{synchronous data-parallel} training on modern
+  accelerators. The object of study is the distributed-training behaviour itself:
+  \begin{itemize}
+    \item How does throughput scale with device count?
+    \item What fraction of wall time is collective overhead?
+    \item What does a single slow device cost the cluster?
+  \end{itemize}
+
+  \textbf{It isn't} a CIFAR-100 SOTA attempt. 9.5\,M params trained from scratch on
+  32$\times$32 thumbnails has a realistic ceiling around 60\,\% top-1 — anything beyond
+  that would require pretraining or heavy augmentation that would muddy the systems signal.
+
+  \vspace{0.6em}
+  \textbf{Why CIFAR-100 / ViT-Small specifically:}
+  \begin{itemize}
+    \item Fits in a single chip's HBM — no need for \emph{tensor} or \emph{pipeline}
+          parallelism, so pure data parallelism is enough.
+    \item 100 epochs complete in $\sim$7\,min, so the scaling \& straggler sweeps are tractable.
+    \item ViT uses dense matmuls that map well onto the TPU MXU — the hardware is working
+          near its peak, making efficiency drops easy to attribute.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Hardware I ran on, and what that means}
+  \textbf{Google Cloud TPU v6e-8 (``Trillium'', single host, 8 chips)}
+  \begin{itemize}
+    \item 32\,GB HBM per chip; each chip has a single MXU (128$\times$128 systolic array).
+    \item On-host interconnect: dedicated ICI links between chips — \emph{not} shared PCIe.
+    \item \texttt{pmean} all-reduce uses hardware collectives over ICI, not NCCL/PCIe.
+  \end{itemize}
+
+  \vspace{0.4em}
+  \textbf{Consequences the experiments actually depend on:}
+  \begin{itemize}
+    \item All-reduce latency is very low ($\mathcal{O}(10\,\mu\text{s})$ for 9.5\,M params
+          in bf16) — so any efficiency drop at k$=$8 is \emph{compute starvation}, not network.
+    \item All 8 chips share one physical host — no cross-host networking, no TCP retransmits;
+          this isolates the ``one slow worker'' effect from real-world noise.
+    \item bf16 matmul is MXU-native — swapping fp32\,$\to$\,bf16 is ~2$\times$ step-time free
+          (see slide~\ref{slide:bf16}).
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Published results in one table}
+  \centering\small
+  \begin{tabular}{@{}lr@{}}\toprule
+    \textbf{Metric} & \textbf{Value} \\ \midrule
+    Test accuracy (top-1)                     & \textbf{55.04\,\%} \\
+    Test accuracy (top-5)                     & \textbf{80.18\,\%} \\
+    Parameters                                & 9.55\,M \\
+    Wall clock, 100 epochs on TPU v6e-8       & 421\,s \\
+    Sustained throughput (training)           & $\approx$\,15{,}000 img/s \\
+    Peak throughput (pure step time, k=8)     & 18{,}814 img/s \\
+    \midrule
+    Scaling efficiency $1\to8$ (strong)       & $1.00\to 0.87\to 0.65\to \mathbf{0.36}$ \\
+    Slowdown from one straggler (200k iters)  & $\mathbf{3.33\times}$ \\
+    \bottomrule
+  \end{tabular}
+  \vspace{0.6em}
+  \\
+  \raggedright\small
+  All numbers reproducible by running \texttt{scripts/run\_gcp\_tpu.sh} against a fresh
+  v6e-8 VM; the \texttt{outputs/} directory in the repo is the verbatim artefact set
+  from that run.
+\end{frame}
+
+% =====================================================================
+\section{Model \& data pipeline}
+
+\begin{frame}{ViT-Small, sized for CIFAR-100}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.55\textwidth}
+      \textbf{Configuration}
+      \begin{itemize}
+        \item Image 32$\times$32$\times$3, \textbf{patch size 4}
+        \item $\Rightarrow$ 64 patches + one \texttt{[CLS]} token (seq len 65)
+        \item 8 transformer blocks
+        \item Hidden dim 384, 6 attention heads
+        \item MLP dim 768 (2$\times$ hidden)
+        \item Pre-norm (LayerNorm \emph{before} attn / MLP)
+        \item Learned 1-D positional embedding
+        \item \textbf{9{,}551{,}140} trainable params
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.45\textwidth}
+      \textbf{Why these choices}
+      \begin{itemize}
+        \item Patch 4 keeps receptive field reasonable for tiny images; patch 8 collapses
+              to 16 patches and underfits.
+        \item Pre-norm: ViT-original was post-norm and diverged without extensive warmup.
+              Pre-norm trains stably with a simple cosine schedule.
+        \item 8 blocks $\times$ 384 dim is the smallest config that still learns
+              CIFAR-100 meaningfully from scratch; smaller underfits, bigger overfits
+              faster on 50k examples.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Data pipeline — numpy, not \texttt{tf.data}}
+  \textbf{One-shot TFDS load, then in-memory numpy for everything else.}
+  \begin{itemize}
+    \item Full CIFAR-100 train set in float32 = 615\,MB — fits comfortably in host RAM.
+    \item Augmentation (random crop + horizontal flip) is a handful of numpy ops per step.
+    \item Avoids \texttt{tf.data}'s graph-construction + Python-GIL interleave overhead.
+  \end{itemize}
+
+  \vspace{0.4em}
+  \textbf{Batch sharding for \texttt{pmap}:}
+  \[
+    (B, H, W, C) \;\longrightarrow\; (N, B/N, H, W, C)
+  \]
+  so \texttt{pmap}'s leading axis matches the number of devices. The helper
+  \texttt{shard\_batch} reshapes per step; host$\to$device transfer is overlapped
+  with the previous step's \texttt{pmean}.
+
+  \vspace{0.4em}
+  \textbf{Trade-offs I'm aware of:}
+  \begin{itemize}
+    \item Doesn't scale past $\sim$50\,GB datasets — ImageNet would need \texttt{tf.data}
+          or Grain.
+    \item No multi-host prefetch — irrelevant on single-host v6e-8, but would matter on a
+          pod slice.
+  \end{itemize}
+\end{frame}
+
+% =====================================================================
+\section{Parallelism mechanics}
+
+\begin{frame}{Why \texttt{pmap}, not \texttt{pjit} / \texttt{shard\_map}?}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.5\textwidth}
+      \textbf{\texttt{pmap} (what I used)}
+      \begin{itemize}
+        \item Single-program-multiple-data
+        \item Explicit replication + sharding
+        \item One collective axis (\texttt{axis\_name})
+        \item Great for \emph{pure data parallelism}
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      \textbf{\texttt{pjit} / \texttt{shard\_map}}
+      \begin{itemize}
+        \item GSPMD partitioner under the hood
+        \item Supports \emph{tensor} + \emph{pipeline} parallelism
+        \item Needs a \texttt{Mesh} + \texttt{PartitionSpec} per array
+        \item Right tool if params don't fit one chip
+      \end{itemize}
+    \end{column}
+  \end{columns}
+
+  \vspace{0.4em}
+  \textbf{Decision.} 9.5\,M params $\times$ 4\,B (fp32) $\approx$ 38\,MB — a rounding error
+  on a 32\,GB chip. No need to split the model. \texttt{pmap} gives me the mental model
+  of \emph{``identical replica on every device, plus one all-reduce''}, which is exactly
+  what the experiments study.
+
+  \vspace{0.4em}
+  \textbf{When I would switch:} a 70\,B-param LLM where the weights alone exceed HBM on
+  any single chip — then \texttt{pjit} with a 2-D mesh (data $\times$ model) becomes
+  unavoidable.
+\end{frame}
+
+\begin{frame}[fragile]{The \texttt{pmap}'d training step (trimmed)}
+\begin{lstlisting}[style=py]
+@partial(jax.pmap, axis_name="batch", devices=devices)
+def train_step(state, batch, rng):
+    rng, dropout_rng = jax.random.split(rng)
+
+    def loss_wrapper(params):
+        return _loss_fn(params, state.apply_fn, batch,
+                        train=True, rng=dropout_rng)
+
+    (loss, accuracy), grads = jax.value_and_grad(
+        loss_wrapper, has_aux=True)(state.params)
+
+    # The all-reduce: mean across the 'batch' axis.
+    grads    = jax.lax.pmean(grads,    axis_name="batch")
+    loss     = jax.lax.pmean(loss,     axis_name="batch")
+    accuracy = jax.lax.pmean(accuracy, axis_name="batch")
+
+    new_state = state.apply_gradients(grads=grads)
+    return new_state, {"loss": loss, "accuracy": accuracy}
+\end{lstlisting}
+  \vspace{-0.4em}
+  \small
+  \textbf{Key points you may want to probe:}
+  \begin{itemize}
+    \item \texttt{pmean} is the \emph{only} synchronisation point. Every device must arrive
+          before any can proceed.
+    \item Gradient reduction is mean, not sum — consistent with single-device training at
+          the same global batch size (the optimiser sees the same loss gradient it would
+          on one big chip).
+    \item The same \texttt{rng} is split per device so dropout masks differ; that's a
+          real source of stochastic divergence, but \texttt{pmean} of grads makes it
+          mathematically irrelevant.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{All-reduce — the collective underneath \texttt{pmean}}
+  \textbf{All-reduce} is a collective-communication primitive with a single signature:
+  \[
+    \text{every device } k \text{ holds } g_k \;\;\longrightarrow\;\;
+    \text{every device } k \text{ holds } G = g_0 \oplus g_1 \oplus \cdots \oplus g_{N-1}.
+  \]
+  Not a reduce then a broadcast — one fused collective, so no single root bottlenecks.
+
+  \vspace{0.6em}
+  \textbf{\texttt{pmean} is a specific application of all-reduce:}
+  \[
+    \mathtt{jax.lax.pmean}(x,\ \mathtt{axis\_name}) \;=\;
+    \frac{1}{N}\,\mathtt{AllReduce}(x,\ \mathrm{op}=\mathrm{SUM}).
+  \]
+  That's literally all it is — SUM via all-reduce, then divide by the device count.
+  (\texttt{psum} skips the divide; you use that for counting, not for averaging gradients.)
+
+  \vspace{0.6em}
+  \textbf{Why this is the barrier both experiments probe:}
+  \begin{itemize}\small
+    \item All-reduce is a \emph{blocking collective} — XLA schedules every device's
+          post-\texttt{pmean} work only after all N participants have contributed.
+    \item In Experiment 2, chips 1–7 arrive in $\sim$52\,ms, chip 0 in $\sim$173\,ms;
+          the 7 fast chips sit inside the collective waiting, giving the 3.33$\times$ cluster slowdown.
+    \item After \texttt{pmean}, every replica's gradient is bit-identical, so
+          \texttt{apply\_gradients} produces bit-identical new params — the invariant
+          \texttt{unreplicate} relies on (see next slide).
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{All-reduce implementations — ring vs. tree}
+  \centering\footnotesize
+  \begin{tabular}{@{}lccl@{}}\toprule
+    Algorithm & Latency & Bandwidth / device & Best for \\ \midrule
+    Naive (star)             & 2 hops        & $O(N\!\cdot\!S)$   & pedagogy only \\
+    Tree all-reduce          & $O(\log N)$   & $S$                & small tensors \\
+    \textbf{Ring all-reduce} & $O(N)$        & $\mathbf{2\tfrac{N-1}{N}\,S}$ — \emph{optimal} & big tensors, few devices \\
+    Double-binary tree (NCCL)& $O(\log N)$   & bandwidth-optimal  & GPU clusters \\
+    \bottomrule
+  \end{tabular}
+
+  \vspace{0.6em}\raggedright\small
+  \textbf{What JAX does on TPU v6e-8.} \texttt{pmean} compiles to XLA's
+  \texttt{AllReduce} HLO op, run as a \textbf{ring reduce-scatter + ring all-gather}
+  over the on-host \textbf{ICI} (inter-chip interconnect).
+
+  \vspace{0.4em}
+  \textbf{Back-of-envelope for my 9.55\,M-param gradient (bf16, $\approx$\,19\,MB):}
+  ring moves $\approx 33$\,MB per chip; at $\sim$90\,GB/s ICI full-duplex that's
+  a few hundred $\mu$s — \textbf{$\sim$1\,\% of the 52\,ms step time}.
+  Communication is not the bottleneck at this scale; compute starvation is.
+
+  \vspace{0.4em}
+  \textbf{Why ring on v6e, not tree?} ICI is a torus — ring is native topology and
+  bandwidth-optimal. A tree would add $\log_2 8 = 3$ latency hops without saving
+  bandwidth. NCCL chooses double-binary trees on GPUs because PCIe+NVLink isn't a
+  clean torus and cross-host latency dominates at small tensors.
+\end{frame}
+
+\begin{frame}{\texttt{devices=} argument — a subtle bug I hit}
+  \textbf{Every \texttt{pmap}, eval step, and \texttt{jax\_utils.replicate} call in this
+  repo accepts an explicit \texttt{devices=} list.}
+
+  \vspace{0.4em}
+  \textbf{Why it matters.} Without it, \texttt{pmap} silently binds to \emph{all} local
+  devices. The scaling experiment (\texttt{k=1,2,4}) uses subsets — so if you forget
+  \texttt{devices=}, the $k=2$ run:
+  \begin{enumerate}\small
+    \item shards the batch as $(2, 512, \ldots)$,
+    \item but \texttt{pmap} expects 8 leading axes,
+    \item XLA throws: ``axis size doesn't match \ldots'' after JIT tracing completes.
+  \end{enumerate}
+
+  \vspace{0.4em}
+  The bug's first manifestation was very confusing because the $k=8$ run worked fine
+  (happened to match the default). I threaded \texttt{devices=} through every API in
+  \texttt{distributed/parallel.py} after tracking it down — now each subset run is
+  explicit about which chips it runs on.
+\end{frame}
+
+\begin{frame}{Replication and unreplication}
+  \textbf{State lifecycle:}
+  \begin{enumerate}
+    \item \texttt{create\_train\_state} on host $\to$ \texttt{TrainState} with params, opt state.
+    \item \texttt{jax\_utils.replicate(state, devices=...)} broadcasts a copy to every device.
+          (Shape goes from $(\text{dims})\to(N,\text{dims})$ on every leaf.)
+    \item \texttt{train\_step} operates on the replicated state; outputs remain replicated.
+    \item For logging/checkpoint, \texttt{jax\_utils.unreplicate} takes the $k=0$ slice —
+          legitimate because \texttt{pmean} guarantees all replicas are bit-identical after
+          every step.
+  \end{enumerate}
+
+  \vspace{0.4em}
+  \textbf{Invariant I rely on.} After \texttt{pmean} on gradients plus identical AdamW
+  updates, every replica has the same params to machine precision. If this invariant
+  breaks, \texttt{unreplicate} would silently drop 7/8 of the information; I verify it
+  by averaging params across replicas every $N$ steps during dev and checking the L2
+  deviation is $<10^{-6}$.
+\end{frame}
+
+% =====================================================================
+\section{Scaling deep-dive}
+
+\begin{frame}{Scaling experiment design}
+  \textbf{Protocol.} Sweep device count $k \in \{1, 2, 4, 8\}$, hold global batch
+  fixed at 1024 (strong scaling). Warm up 5 steps, time the next 20, keep the
+  \texttt{(mean, std, p50, p95, p99)}.
+
+  \vspace{0.4em}
+  \textbf{Definitions.}
+  \[
+    \Theta_k = \frac{B}{T_k}, \qquad
+    S_k = \frac{T_1}{T_k}, \qquad
+    \eta_k = \frac{S_k}{k} = \frac{\Theta_k}{k\cdot\Theta_1}
+  \]
+
+  \vspace{0.3em}
+  \textbf{What I measure vs.\ what I don't.}
+  \begin{itemize}\small
+    \item \emph{Do:} pure JIT-compiled step time (params $\to$ grads $\to$ \texttt{pmean}
+          $\to$ optimiser). Excludes data loading — already overlapped with compute.
+    \item \emph{Don't:} first-batch compile time, checkpoint IO, eval passes. These would
+          dominate a 20-step benchmark and are not what scaling theory asks about.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Scaling results — full table}
+  \centering\scriptsize
+  \begin{tabular}{@{}crrrrrrr@{}}\toprule
+    $k$ & $T_k$ (ms) & $\sigma_T$ & $p50$ & $p95$ & $p99$ & $\Theta_k$ (img/s) & $\eta_k$ \\
+    \midrule
+    1 & 158.65 & 0.50 & 158.63 & 159.16 & 159.40 &  6{,}454 & 1.000 \\
+    2 &  91.14 & 0.57 &  91.02 &  92.01 &  93.19 & 11{,}235 & 0.870 \\
+    4 &  60.98 & 0.74 &  60.91 &  62.39 &  62.68 & 16{,}792 & 0.650 \\
+    8 &  54.43 & 0.92 &  54.30 &  55.94 &  56.82 & 18{,}814 & \textbf{0.364} \\
+    \bottomrule
+  \end{tabular}
+
+  \vspace{0.6em}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.5\textwidth}
+      \includegraphics[width=\linewidth]{scaling/throughput_vs_devices.png}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      \includegraphics[width=\linewidth]{scaling/step_time_vs_devices.png}
+    \end{column}
+  \end{columns}
+  \vspace{0.2em}
+  \small
+  \textbf{Reading the table.} Step time stops halving after $k=4$ (91\,ms $\to$ 61\,ms is
+  a $1.49\times$ speedup; 61\,ms $\to$ 54\,ms is only $1.12\times$). That's where efficiency
+  falls off a cliff.
+\end{frame}
+
+\begin{frame}{Why strong scaling collapses to 36\,\% at $k=8$}
+  Two mechanisms compound:
+  \begin{enumerate}
+    \item \textbf{Per-device batch halves on every doubling.}\\
+          $B/k = 1024, 512, 256, 128$. At 128, each chip's MXU stays idle a growing
+          fraction of every step. ViT-Small's forward pass on 128 samples is already
+          nearly memory-bound, not compute-bound.
+    \item \textbf{All-reduce grows as a share of step time.}\\
+          \texttt{pmean} latency is nearly independent of $k$ on a single host
+          (ring-reduce over ICI), but step time $T_k$ shrinks — so its \emph{fraction}
+          grows from $\sim$2\,\% at $k=1$ to $\sim$8\,\% at $k=8$.
+  \end{enumerate}
+
+  \vspace{0.4em}
+  \textbf{What would fix it:} \emph{weak} scaling — keep per-device batch fixed at 1024,
+  grow global batch with $k$. Expected efficiency $>85\,\%$ through $k=8$. I didn't run
+  it because the scaling experiment is specifically asking ``what's the cost of more
+  parallelism at fixed problem size,'' which is the strong-scaling question.
+
+  \vspace{0.4em}
+  \textbf{Amdahl reading.} If the serial fraction is $f$, then $\eta_k = 1/(1 + f(k-1))$.
+  Solving from $\eta_8 = 0.36$ gives $f \approx 0.25$ — a quarter of each step is
+  ``non-parallelisable'' at this batch size, which matches my observed ~8\,\% all-reduce
+  plus ~17\,\% MXU starvation.
+\end{frame}
+
+% =====================================================================
+\section{Straggler deep-dive}
+
+\begin{frame}{Straggler experiment design}
+  \textbf{Research question.} What is the multiplicative cost of \emph{one} slow device
+  in a nominally-healthy synchronous cluster?
+
+  \vspace{0.4em}
+  \textbf{Setup.} Baseline run (all 8 chips equal) plus 5 straggler runs, each injecting
+  a \texttt{fori\_loop} of extra $512\times512$ matmuls on device 0 only.
+
+  \vspace{0.4em}
+  \textbf{Delays swept:} $\{5\text{k}, 20\text{k}, 50\text{k}, 100\text{k}, 200\text{k}\}$ iterations — chosen to span ``imperceptible'' through ``catastrophic.''
+
+  \vspace{0.4em}
+  \textbf{Metric.} Slowdown factor $\sigma = T_{\text{straggler}} / T_{\text{baseline}}$.
+  Throughput is just $B/T$.
+\end{frame}
+
+\begin{frame}{Straggler results — full table}
+  \centering\small
+  \begin{tabular}{@{}lrrrr@{}}\toprule
+    Label & Delay iters & Step time (ms) & Throughput (img/s) & Slowdown \\ \midrule
+    baseline         & --       &  51.83 & 19{,}757 & 1.000 \\
+    straggler\_5000  &   5{,}000 &  57.58 & 17{,}785 & 1.111 \\
+    straggler\_20000 &  20{,}000 &  65.46 & 15{,}644 & 1.263 \\
+    straggler\_50000 &  50{,}000 &  83.31 & 12{,}291 & 1.607 \\
+    straggler\_100000 & 100{,}000 & 110.76 &  9{,}245 & 2.137 \\
+    straggler\_200000 & 200{,}000 & 172.57 &  5{,}934 & \textbf{3.330} \\
+    \bottomrule
+  \end{tabular}
+
+  \vspace{0.4em}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.5\textwidth}
+      \includegraphics[width=\linewidth]{straggler/step_time_comparison.png}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      \includegraphics[width=\linewidth]{straggler/slowdown_vs_delay.png}
+    \end{column}
+  \end{columns}
+  \vspace{0.2em}\small
+  \textbf{Noteworthy.} The relationship is near-linear in delay-iteration count, with a
+  small fixed overhead (extra HBM traffic for the delay tensor). Exactly what a simple
+  ``barrier = slowest device'' model predicts.
+\end{frame}
+
+\begin{frame}[fragile]{The straggler injection, actual source}
+\begin{lstlisting}[style=py]
+device_idx = jax.lax.axis_index("batch")
+side = 512
+
+def _straggler(acc):
+    def body(i, a):
+        return jnp.tanh(a @ a) * 0.99 + 0.01 * a  # nonlinear, chained
+    return jax.lax.fori_loop(0, delay_iterations, body, acc)
+
+def _no_delay(acc):
+    return acc
+
+# Non-uniform initialiser so early iterations do real work.
+anchor = jnp.linspace(-1.0, 1.0, side*side,
+                      dtype=jnp.float32).reshape(side, side)
+delay_out = jax.lax.cond(device_idx == 0, _straggler, _no_delay, anchor)
+
+# Keep the fori_loop alive through XLA's DCE.
+loss, delay_sum = jax.lax.optimization_barrier((loss, jnp.sum(delay_out)))
+loss = loss + 1e-30 * delay_sum    # numerically inert, structurally required
+\end{lstlisting}
+  \vspace{-0.3em}\small
+  Every line is a defence against a specific XLA optimisation pass; see next slide.
+\end{frame}
+
+\begin{frame}{Why the ``obvious'' straggler implementations don't work}
+  \textbf{Attempt 1 — \texttt{time.sleep(delay\_ms)} on device 0.}\\
+  \textcolor{warn}{Fails:} \texttt{time.sleep} is a Python call. It can't run inside a
+  \texttt{pmap}'d JIT-compiled XLA program — the whole step is one HLO graph, traced
+  once and executed on-device. Python doesn't enter the picture.
+
+  \vspace{0.5em}
+  \textbf{Attempt 2 — a trivial \texttt{fori\_loop} body like \texttt{a @ eye(64) + 0*a}.}\\
+  \textcolor{warn}{Fails silently:} XLA's algebraic simplifier recognises
+  \texttt{a @ I = a} and \texttt{0 * a = 0}, folds the body to the identity, then DCE
+  removes the whole loop when the output isn't used. Measured: \emph{zero} slowdown.
+
+  \vspace{0.5em}
+  \textbf{Attempt 3 — use the loop output, but keep the body algebraically simple.}\\
+  \textcolor{warn}{Fails quietly:} XLA's loop invariant code motion hoists the matmul
+  out of the loop if the iteration variable doesn't appear in the body. The loop becomes
+  $O(1)$.
+
+  \vspace{0.5em}
+  \textbf{Attempt 4 (what I shipped) — nonlinear, chained, barriered.}\\
+  \textcolor{ok}{Works:} \texttt{tanh(a @ a)} is nonlinear so each iteration truly
+  depends on the previous; \texttt{optimization\_barrier} blocks cross-boundary
+  reasoning; the \texttt{1e-30} coupling prevents DCE from pruning the output.
+\end{frame}
+
+\begin{frame}{Why $512\times512$, not $64\times64$?}
+  \textbf{Short answer:} signal-to-noise ratio.
+
+  \vspace{0.4em}
+  \begin{itemize}
+    \item $64\times64$ matmul $\approx 0.5$\,MFLOPs/iter. On a v6e MXU this completes in
+          $\sim$5\,ns — faster than the profiler's clock granularity. At 200k iterations
+          that's only $\sim$1\,ms, \emph{well below} the baseline step's own $\sigma \approx 0.7$\,ms.
+    \item $512\times512$ matmul $\approx 268$\,MFLOPs/iter, about $\sim$3\,$\mu$s on a v6e.
+          200k iters $=$ $\sim$600\,ms — now the straggler effect (measured: +121\,ms)
+          is much larger than baseline jitter.
+  \end{itemize}
+
+  \vspace{0.4em}
+  \textbf{Why 200k is still the max I swept.} Any larger and the step time passes the
+  TPU runtime's internal watchdog thresholds; also 3.33$\times$ was already enough to
+  make the point. Users interested in \emph{catastrophic} cases (10$\times$+) should
+  swap from synchronous SGD entirely, not run longer delays.
+\end{frame}
+
+\begin{frame}{Straggler implications — why this matters}
+  \textbf{Real-world analogues to my 3.33$\times$ measurement:}
+  \begin{itemize}
+    \item Thermal throttling on one chip under sustained load.
+    \item A network hiccup in a multi-host pod — cross-host ICI trip times vary.
+    \item A misconfigured VM where one device's TDP is lower than its peers.
+    \item Background processes sharing a host (in a multi-tenant setup).
+  \end{itemize}
+
+  \vspace{0.4em}
+  \textbf{Mitigation strategies in industry (why the 3.33$\times$ number drives design):}
+  \begin{itemize}
+    \item \emph{Async-SGD} (Google's DistBelief): drop the synchronisation barrier entirely.
+          Cost: stale gradients, convergence penalty.
+    \item \emph{Backup workers} (Chen et al., 2016): run $k+b$ workers, use the first $k$
+          responses. Cost: $b/k$ extra hardware.
+    \item \emph{Elastic training} (PyTorch Elastic, Kubernetes-style): detect stragglers,
+          evict them, re-shard. Cost: operational complexity.
+    \item \emph{Gradient compression / hierarchical all-reduce:} reduces the barrier cost
+          but doesn't remove it.
+  \end{itemize}
+\end{frame}
+
+% =====================================================================
+\section{Accuracy \& training analysis}
+
+\begin{frame}{Training curves — overfitting is real}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.5\textwidth}
+      \includegraphics[width=\linewidth,height=0.78\textheight,keepaspectratio]%
+        {training/100_epoch/training_curves.png}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      \small
+      \textbf{What the curves show:}
+      \begin{itemize}
+        \item Training loss falls monotonically from 4.6 $\to$ 0.03
+              (train acc $\to$ 99\,\%).
+        \item \textbf{Test loss bottoms at epoch 32} ($L_{\text{test}} = 1.93$),
+              then climbs back to 2.72 by epoch 100.
+        \item Test \emph{accuracy} still creeps from 54\,\% $\to$ 55\,\% over
+              epochs 32$\to$100 — the model grows more confident on examples
+              it already gets right, even as it misclassifies more.
+      \end{itemize}
+      \vspace{0.4em}
+      \textbf{Early-stopping at epoch 32} would give test loss 1.93 and test acc
+      $\sim$54.5\,\%; I reported the full 100-epoch run to keep the headline
+      number honest (and the scaling/straggler runs use the same training program).
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Per-class accuracy}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.58\textwidth}
+      \includegraphics[width=\linewidth,height=0.75\textheight,keepaspectratio]%
+        {training/100_epoch/per_class_accuracy.png}
+    \end{column}
+    \begin{column}{0.42\textwidth}
+      \small
+      \textbf{Best classes:} \\
+      sunflower 85\,\%, skunk 84\,\%, orange 84\,\%, road 84\,\%, plain 84\,\%.\\
+      $\to$ distinct colours \emph{or} distinct shapes.
+
+      \vspace{0.6em}
+      \textbf{Worst classes:} \\
+      seal 24\,\%, lizard 30\,\%, otter 31\,\%, man 31\,\%, turtle 33\,\%.\\
+      $\to$ visually ambiguous fine categories on 32$\times$32.
+
+      \vspace{0.6em}
+      The spread (24\,\%$\to$85\,\%) tells me the model learned useful visual features,
+      just not enough resolution-invariance to discriminate fine-grained categories
+      whose 32$\times$32 thumbnails are indistinguishable even to a human.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Confusion matrix — the model learned \emph{categories}, not fine labels}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.55\textwidth}
+      \includegraphics[width=\linewidth,height=0.75\textheight,keepaspectratio]%
+        {training/100_epoch/confusion_matrix.png}
+    \end{column}
+    \begin{column}{0.45\textwidth}
+      \small
+      \textbf{Top 5 confusions:}
+      \begin{enumerate}
+        \item maple\_tree $\to$ oak\_tree (19$\times$)
+        \item pine\_tree $\to$ oak\_tree (17$\times$)
+        \item oak\_tree $\to$ maple\_tree (16$\times$)
+        \item man $\to$ woman (16$\times$)
+        \item bus $\to$ pickup\_truck (14$\times$)
+      \end{enumerate}
+
+      \vspace{0.5em}
+      Three tree classes form a visible $3\times 3$ block in the bottom-right — exactly
+      where the CIFAR-100 ``trees'' superclass lives.
+
+      \vspace{0.4em}
+      \textbf{Interpretation.} The model's latent space is organised around
+      CIFAR-100's 20 coarse superclasses; it struggles with the fine labels \emph{within}
+      a superclass. Consistent with what a 9.5\,M-param model learns from 50k examples
+      on 32$\times$32 thumbnails.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Sample predictions — confident, wrong, and hallucinating}
+  \footnotesize\ttfamily
+  \begin{tabular}{@{}p{0.45\linewidth}p{0.5\linewidth}@{}}\toprule
+    \textrm{\textbf{Input}} & \textrm{\textbf{Top-5 predictions}} \\ \midrule
+    seed 0, true = tiger &
+      \textbf{tiger} 0.959 · squirrel 0.021 · cup 0.009 · wolf 0.003 \\
+      & \textrm{$\leftarrow$ correct, high-confidence} \\ \midrule
+    seed 3, true = bus &
+      porcupine 0.400 · turtle 0.261 · \textbf{pickup\_truck} 0.099 · tank 0.071 · oak\_tree 0.063 \\
+      & \textrm{$\leftarrow$ top-1 wrong, but 2 vehicles in top-5: ``vehicle'' class is right} \\ \midrule
+    seed 1, true = spider &
+      trout 0.505 · boy 0.162 · wolf 0.125 · girl 0.087 · \textbf{spider} 0.044 \\
+      & \textrm{$\leftarrow$ true class barely in top-5 — genuine hallucination} \\ \bottomrule
+  \end{tabular}
+
+  \vspace{0.5em}\rmfamily\small
+  These three cases summarise the accuracy profile: a confident-correct majority, a
+  big ``right category, wrong fine label'' tier, and a small residual hallucination tier
+  that limits the from-scratch accuracy ceiling on 32$\times$32.
+\end{frame}
+
+% =====================================================================
+\section{Design decisions, limits, future work}
+
+\begin{frame}\label{slide:bf16}{bf16 — free throughput on MXU hardware}
+  \textbf{What \texttt{--precision bf16} actually does here:}
+  \begin{itemize}
+    \item Flips the global flag \texttt{jax\_default\_matmul\_precision} to \texttt{bfloat16}.
+    \item \textbf{Parameters and optimiser state stay in fp32.}
+    \item Only \emph{matmuls} downcast on the MXU: \texttt{Dense}, attention QKV, einsum ops.
+          Activations remain fp32 between matmul boundaries.
+    \item Outputs get cast back to fp32 at the MXU boundary — no precision escapes.
+  \end{itemize}
+
+  \vspace{0.4em}
+  \textbf{Why this is safe.} bf16 has fp32's exponent range (8 bits) — overflow behaves
+  identically. It loses mantissa precision (8 bits vs 23). Gradient noise in SGD at
+  batch 1024 dwarfs this, and fp32 optimiser state absorbs any accumulated error.
+
+  \vspace{0.4em}
+  \textbf{What you get.} $\sim$2$\times$ step-time win vs.\ pure fp32 on v6e, no accuracy loss
+  observed (within the seed-to-seed variance of the 100-epoch run).
+\end{frame}
+
+\begin{frame}{Checkpointing — deliberately minimal}
+  \textbf{Stack:} \texttt{flax.serialization} $\to$ msgpack. No Orbax, no
+  \texttt{cloud-tpu-checkpoint}, no GCS streaming.
+
+  \vspace{0.4em}
+  \textbf{Rationale.}
+  \begin{itemize}
+    \item One checkpoint per epoch; 9.5\,M params $\times$ 4\,B $\approx$ 38\,MB per file.
+          Writing it is $\sim$200\,ms — irrelevant vs.\ the 4-second epoch.
+    \item I keep \texttt{checkpoint\_latest.msgpack} + numbered history files, plus a
+          sidecar \texttt{checkpoint\_latest.json} containing the full config.
+    \item That JSON matters because \texttt{inference.py} rebuilds the model
+          \emph{only from the checkpoint's metadata} — no hand-passed hyperparameters
+          at inference time.
+  \end{itemize}
+
+  \vspace{0.4em}
+  \textbf{Limit I accept.} No distributed checkpointing (multi-host pods need sharded
+  writes), no async write (would matter if epoch time was closer to checkpoint IO).
+  For a single-host v6e-8 run this is sufficient.
+\end{frame}
+
+\begin{frame}{Six design decisions, catalogued}
+  \small
+  \begin{enumerate}
+    \item \textbf{\texttt{pmap}, not \texttt{pjit}.} Pure data parallelism; 9.5\,M params
+          fit in any chip. \texttt{pjit} is the right tool for tensor/pipeline parallelism
+          in the regime where weights don't fit — out of scope here.
+    \item \textbf{Numpy-only data pipeline.} 615\,MB of fp32 train data fits in host RAM.
+          Avoids \texttt{tf.data}'s runtime overhead; doesn't scale past $\sim$50\,GB.
+    \item \textbf{Straggler via real XLA compute, not \texttt{time.sleep}.}
+          \texttt{time.sleep} is Python — doesn't run inside a compiled pmap'd step.
+          Must use a JAX-visible construct, which in turn must survive XLA's optimiser.
+    \item \textbf{Device subsets threaded through every API.} Forgetting \texttt{devices=}
+          breaks scaling subset runs on any multi-device host. Threaded explicitly.
+    \item \textbf{bf16 without parameter dtype changes.} Global matmul flag only;
+          params + opt state stay fp32. Cheap, safe, $\sim$2$\times$ win.
+    \item \textbf{Checkpointing via \texttt{flax.serialization}.} Msgpack + sidecar JSON.
+          No Orbax/GCS dependency. Inference rebuilds the model from JSON alone.
+  \end{enumerate}
+\end{frame}
+
+\begin{frame}{Tech stack}
+  \begin{itemize}
+    \item \textbf{JAX} — XLA-compiled numerical computing + autodiff. The entire training
+          step is one JIT-compiled HLO graph per device.
+    \item \textbf{Flax Linen} — neural-network modules (thin wrapper around JAX).
+    \item \textbf{Optax} — optimisers and schedules. I use \texttt{adamw} with a cosine
+          schedule ($\eta_{\max}=10^{-3}$, warmup 5\,\% of steps).
+    \item \textbf{TensorFlow-datasets} — CIFAR-100 loading (one-shot only).
+    \item \textbf{matplotlib} — every plot in \texttt{outputs/}.
+  \end{itemize}
+
+  \vspace{0.4em}
+  \textbf{Deliberately missing.}
+  \begin{itemize}\small
+    \item No W\&B / MLflow — metrics go to CSV and JSON, diffable in git.
+    \item No Hydra — one YAML + argparse flags; \texttt{configs/default.yaml} is 30 lines.
+    \item No Docker — \texttt{scripts/setup.sh} detects host type (CPU / GPU / TPU) and
+          installs the right \texttt{jax[\ldots]} wheel once.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Limits I know about}
+  \textbf{Scale limits of this implementation:}
+  \begin{itemize}
+    \item \textbf{Single-host only.} \texttt{pmap} works across hosts with extra plumbing,
+          but the numpy data pipeline doesn't — a multi-host pod slice would need
+          \texttt{tf.data} or Grain with per-host sharding.
+    \item \textbf{Model fits one chip.} If it didn't, everything changes: \texttt{pjit}
+          with a mesh, sharded parameter storage, sharded optimiser state (ZeRO-style).
+    \item \textbf{No gradient accumulation.} Global batch = per-step batch; I can't
+          simulate a 16k batch on a single v6e-8.
+  \end{itemize}
+
+  \vspace{0.3em}
+  \textbf{Honesty flags on the accuracy number:}
+  \begin{itemize}
+    \item 55\,\% is 100-epoch; early-stop at epoch 32 would give $\sim$54.5\,\% with a
+          meaningfully lower test loss. The 55\,\% headline is tied to the 100-epoch
+          wall-clock number because they came from the same run.
+    \item No pretraining, no CutMix/MixUp, no label smoothing — each would add 3--6
+          accuracy points but move the project away from systems analysis.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{What I'd do next}
+  \begin{enumerate}
+    \item \textbf{Weak-scaling companion experiment.} Hold per-device batch fixed at 1024,
+          grow global batch to 8192 at $k=8$. Expected: $>85\,\%$ efficiency, confirming
+          the MXU-starvation diagnosis for the strong-scaling drop.
+    \item \textbf{Async-SGD comparison.} Implement a simple parameter-server async variant
+          and re-run the straggler experiment. Predicted: slowdown factor decouples from
+          the slowest device (at the cost of convergence speed).
+    \item \textbf{Multi-host.} Run on a v5p-32 pod slice, measure cross-host all-reduce
+          latency, revisit the all-reduce-share analysis from the scaling section.
+    \item \textbf{Model-parallel sanity check.} Port to \texttt{pjit}/\texttt{shard\_map}
+          with a $2\times 4$ mesh and a $\sim$1\,B-param ViT-Huge variant — to see where
+          tensor parallelism becomes necessary rather than optional.
+    \item \textbf{Profile-guided straggler source.} Use XLA HLO traces + jaxlib's timeline
+          export to \emph{see} the barrier waits directly, not just infer them from step
+          time.
+  \end{enumerate}
+\end{frame}
+
+% =====================================================================
+\section*{References \& appendix}
+
+\begin{frame}{Anticipated questions — index}
+  \small
+  \begin{itemize}
+    \item \emph{``Why did scaling drop to 36\,\%?''} $\to$ slide on strong-scaling collapse.
+    \item \emph{``How does your straggler injection survive XLA optimisation?''} $\to$
+          slide on the three failed attempts + fix; actual source slide.
+    \item \emph{``Why bf16 and is it safe?''} $\to$ bf16 slide.
+    \item \emph{``Why numpy instead of tf.data?''} $\to$ data pipeline slide.
+    \item \emph{``What would async-SGD give you here?''} $\to$ straggler implications
+          + future-work slides.
+    \item \emph{``Why 55\,\% test accuracy — is the model broken?''} $\to$ overfitting
+          + per-class + honesty flags slides.
+    \item \emph{``Why pmap and not pjit?''} $\to$ parallelism mechanics slide.
+    \item \emph{``What is pmean actually doing under the hood?''} $\to$
+          all-reduce primitive slide.
+    \item \emph{``Ring vs.\ tree all-reduce — why ring on TPU?''} $\to$
+          all-reduce implementations slide.
+    \item \emph{``What breaks if you go multi-host?''} $\to$ limits slide.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Artefact pointers}
+  \small
+  Every number in this deck is reproducible from the repo:
+  \begin{itemize}
+    \item \texttt{outputs/scaling/scaling\_results.csv} — full scaling table.
+    \item \texttt{outputs/straggler/straggler\_results.csv} — full straggler table.
+    \item \texttt{outputs/training/100\_epoch/epoch\_metrics.csv} — training curves data.
+    \item \texttt{outputs/training/100\_epoch/test\_summary.json} — headline accuracy.
+    \item \texttt{outputs/training/100\_epoch/test\_predictions.npz} — full
+          10k-example logits + labels for the per-class and confusion analyses.
+    \item \texttt{vit\_jax\_distributed/distributed/parallel.py} — the pmap'd train step
+          and straggler injection, in full.
+  \end{itemize}
+
+  \vspace{0.5em}
+  Repo: \texttt{github.com/Michael-OvO/vit-jax-distributed-scaling}\\
+  Final project, Team Tensor, CS 390 — Distributed Systems, Duke, Spring 2026.
+\end{frame}
+
+\begin{frame}[plain]\begin{center}
+  {\huge\bfseries Thank you}\\[0.5em]
+  {\normalsize Happy to dig into any of the above in more depth.}
+\end{center}\end{frame}
+
+\end{document}

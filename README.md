@@ -8,12 +8,17 @@
 > **Author:** Jinao Wang
 
 Distributed data-parallel training of a Vision Transformer (ViT-Small) on CIFAR-100 in
-JAX/Flax, with two structured experiments for **scaling analysis** and **straggler
-simulation** on Google Cloud TPUs.
+JAX/Flax, with two experiments for scaling analysis and straggler simulation on Google
+Cloud TPUs.
 
-This is a **systems-focused** ML project: the goal is to understand distributed training
-behaviour — synchronisation overhead, throughput scaling, and the impact of slow workers —
-not to set accuracy records on CIFAR-100.
+This is a systems-focused ML project. The point is to understand how distributed training
+actually behaves (sync overhead, throughput scaling, what a slow worker costs you), not to
+push accuracy numbers on CIFAR-100.
+
+> 📄 **Full write-up:** for the complete technical discussion — extended background,
+> per-experiment methodology, ablations, and all figures — see the 30-minute backup deck at
+> [`slides/30min_backup_deck.pdf`](slides/30min_backup_deck.pdf). The README is the short
+> tour; the deck is the long one.
 
 ## Results at a glance
 
@@ -73,8 +78,8 @@ outputs/                      Plots, CSVs, JSON logs from published runs
 4. **All-reduce** gradients via `jax.lax.pmean(grads, axis_name='batch')`.
 5. **Update** parameters identically on every device.
 
-The `pmean` call is the synchronisation barrier. Every device must reach it before any can
-proceed — this is the mechanism the straggler experiment measures.
+The `pmean` call is the synchronisation barrier: every device has to reach it before any
+can proceed. That's the mechanism the straggler experiment pokes at.
 
 ### One training step, visualised
 
@@ -100,10 +105,10 @@ flowchart LR
     class Batch,Shard,Upd,Next normal
 ```
 
-Every device has its own slice of the batch and computes its own local gradient; the
-`pmean` barrier averages them into one shared gradient, and the optimiser update then
-produces identical new parameters on every device. This keeps distributed training
-mathematically equivalent to training on a single device with the full global batch.
+Each device has its own slice of the batch and computes its own local gradient. The
+`pmean` barrier averages those into one shared gradient, and the optimiser update then
+produces identical new parameters on every device. Net effect: distributed training is
+mathematically equivalent to training on one device with the full global batch.
 
 ## Experiments
 
@@ -119,10 +124,10 @@ Plots: `outputs/scaling/throughput_vs_devices.png`,
 ### Straggler — one slow device, whole cluster pays
 Baseline vs. 5 injected compute delays on device 0. The delay is a
 `jax.lax.fori_loop` of real 512 × 512 matmuls, threaded through
-`jax.lax.optimization_barrier` so XLA cannot elide it. Reports the slowdown ratio.
+`jax.lax.optimization_barrier` so XLA can't elide it. Reports the slowdown ratio.
 
-The effect is the whole point of the experiment: one device runs its extra work while the
-other seven sit idle at the all-reduce barrier, waiting.
+That's the whole point of the experiment: device 0 does its extra work while the other
+seven sit idle at the all-reduce barrier, waiting.
 
 ```mermaid
 gantt
@@ -182,9 +187,9 @@ bash scripts/run_gcp_tpu.sh           # runs all three experiments, bf16
 gcloud compute tpus tpu-vm delete vit-training --zone=us-central1-b
 ```
 
-The setup script detects TPU VMs via `/dev/accel*` and the `TPU_NAME` env var (no JAX
-required for the probe) and installs `jax[tpu]` **exactly once** so `pip install -r
-requirements.txt` afterwards cannot clobber it.
+The setup script detects TPU VMs by checking `/dev/accel*` and the `TPU_NAME` env var (no
+JAX required for the probe) and installs `jax[tpu]` exactly once, before
+`pip install -r requirements.txt` has a chance to clobber it with a CPU wheel.
 
 ### GCP multi-GPU VM
 
@@ -294,23 +299,23 @@ outputs/
 
 ## What the numbers say
 
-**Strong scaling drops to 36 %** at 8 chips because per-device batch halves on every
-doubling — the MXU becomes starved of work and all-reduce overhead starts to dominate.
-Weak scaling (per-device batch fixed) would stay > 85 % here.
+**Strong scaling drops to 36 %** at 8 chips. Per-device batch halves on every doubling,
+so the MXU gets starved of work and all-reduce starts to dominate step time. Weak scaling
+(fixed per-device batch) would stay > 85 % here.
 
 **A single straggler device (200 k extra matmul iters) slows the entire 8-chip cluster
-by 3.33×**, dropping throughput from 19 800 img/s to 5 900 img/s. That's the cost of
-one bad chip in a nominally-healthy cluster — the classic argument for async-SGD,
+by 3.33×**, dropping throughput from 19 800 img/s to 5 900 img/s. That's the cost of one
+bad chip in an otherwise-healthy cluster, and it's the classic argument for async SGD,
 backup workers, and elastic training.
 
-**The model overfits after epoch ~33**: training loss keeps falling (to 0.03 at epoch
-100, i.e. 99 % train accuracy), but test loss bottoms at epoch 32 (1.93) and then
-climbs back to 2.72. Test accuracy still creeps upward to 55 % because the model grows
-more confident on the examples it was already getting right. See
+**The model overfits after epoch ~33.** Training loss keeps falling (down to 0.03 at
+epoch 100, i.e. 99 % train accuracy), but test loss bottoms out at epoch 32 (1.93) and
+climbs back to 2.72 by the end. Test accuracy still creeps upward to 55 % — the model
+just keeps getting more confident about the examples it was already getting right. See
 `outputs/training/100_epoch/training_curves.png`.
 
-**The model learned categories, not fine labels**: the top 5 most-common confusions
-are `maple_tree → oak_tree` (19×), `pine_tree → oak_tree` (17×), `oak_tree → maple_tree`
+**The model learned categories, not fine labels.** The top 5 most-common confusions are
+`maple_tree → oak_tree` (19×), `pine_tree → oak_tree` (17×), `oak_tree → maple_tree`
 (16×), `man → woman` (16×), `bus → pickup_truck` (14×). See the confusion matrix.
 
 ## Classification examples
@@ -319,9 +324,9 @@ are `maple_tree → oak_tree` (19×), `pine_tree → oak_tree` (17×), `oak_tree
 
 ![Inference thumbnails](outputs/training/100_epoch/inference_thumbnails.png)
 
-24 random test images with the model's top-3 predictions under each tile. **Green**
-border = the model's top-1 was correct; **red** = wrong. Mixed intentionally
-(half-correct, half-wrong) so both the successes and the failure modes are visible.
+24 random test images with the model's top-3 predictions under each tile. Green border
+means the top-1 was correct, red means it wasn't. I mixed it roughly half-and-half on
+purpose, so you can see both the wins and the failure modes in one figure.
 
 ### Text transcript of five sample classifications
 
@@ -351,11 +356,10 @@ Seed 1 — true class: spider
   5. spider             p = 0.044  ← true class barely in top-5
 ```
 
-The tiger example is the confident, correct case. The bus example shows what "learned
-categories, not fine labels" means in practice — the top-1 is wildly wrong, but
-`pickup_truck` and `tank` are both vehicles in the top-5. The spider example is a
-genuine hallucination, the kind that limits an accuracy-from-scratch ceiling on 32×32
-thumbnails.
+The tiger is the easy, confident case. The bus is what "learned categories, not fine
+labels" looks like in practice: the top-1 is wildly wrong, but `pickup_truck` and `tank`
+are both vehicles and both show up in the top-5. The spider is a genuine hallucination —
+the kind of failure that caps what you can get out of 32×32 thumbnails from scratch.
 
 ### Per-class accuracy
 
@@ -375,49 +379,48 @@ green tracks accuracy; the dashed line marks the 55.04 % overall mean.
 
 Rows sum to 1 (probability of a predicted class given a true class). A perfect model
 would be a pure diagonal; ours is diagonal-heavy but with bright off-diagonal clusters
-exactly where related categories live — the three tree classes form a little cross in
-the bottom-right corner, for instance.
+exactly where related categories live. The three tree classes form a little cross in the
+bottom-right corner, for example.
 
 ## Design decisions
 
 1. **`pmap`, not `pjit`/`shard_map`.** For pure data parallelism, `pmap` is simpler and
-   more explicit. `pjit` is the right tool for *tensor* or *pipeline* parallelism, which
-   the 9.5 M-param model on a single chip's HBM does not need.
+   more explicit. `pjit` is the right tool for *tensor* or *pipeline* parallelism, neither
+   of which a 9.5 M-param model fitting in a single chip's HBM needs.
 
 2. **Numpy-only data pipeline.** After the initial TFDS load, augmentation and batching
-   are in-memory numpy operations. The full CIFAR-100 float32 train set is ~615 MB — fits
-   comfortably in RAM, and avoids the `tf.data` runtime overhead.
+   are in-memory numpy operations. The full CIFAR-100 float32 train set is ~615 MB, which
+   fits comfortably in RAM and sidesteps the `tf.data` runtime overhead.
 
 3. **Straggler via real XLA compute, not `time.sleep`.** `time.sleep` is a Python call;
-   it doesn't run inside a pmap'd JIT program. We inject a `jax.lax.fori_loop` of
-   nonlinear 512×512 matmuls, threaded through `jax.lax.optimization_barrier`, so XLA's
-   algebraic simplifier and dead-code eliminator can't optimise it away. (An earlier
-   attempt with `a @ eye(64) + 0*a` was algebraically the identity and got completely
-   elided — the commit history has the fix.)
+   it doesn't run inside a pmap'd JIT program, and even if it did, a smart scheduler
+   could hide it. So I inject a `jax.lax.fori_loop` of nonlinear 512×512 matmuls and
+   thread the result through `jax.lax.optimization_barrier`, which stops XLA's algebraic
+   simplifier and DCE from optimising the loop away. My first attempt used
+   `a @ eye(64) + 0*a` and got folded to the identity; the commit history has the fix.
 
 4. **Device subsets threaded through `pmap`.** Every `pmap`, `eval_step`, and
-   `jax_utils.replicate` call in this repo accepts an explicit `devices=` list. Omitting
-   this breaks the scaling experiment on multi-device hosts, because `pmap` otherwise
-   silently binds to all local devices and the sharded batch's leading dimension fails
-   to match.
+   `jax_utils.replicate` call in this repo takes an explicit `devices=` list. Skip it
+   and the scaling experiment breaks on multi-device hosts: `pmap` silently binds to
+   all local devices and the sharded batch's leading dimension no longer matches.
 
 5. **bf16 without parameter dtype changes.** `--precision bf16` flips
    `jax_default_matmul_precision` to `bfloat16` globally. fp32 parameters and optimizer
    state are preserved; only matmuls (Dense, attention QKV, einsum) downcast on the MXU.
-   Cheap and safe on v3/v6e TPUs — a ~2× step-time win.
+   Cheap and safe on v3/v6e TPUs, and worth roughly a 2× step-time win.
 
-6. **Checkpointing via `flax.serialization`.** msgpack format; no orbax or
-   cloud-tpu-checkpoint dependency. One `checkpoint_latest.msgpack` + numbered history
-   per epoch, plus a sidecar JSON with the exact config so `inference.py` can rebuild
-   the model without any hand-passed hyper-parameters.
+6. **Checkpointing via `flax.serialization`.** msgpack format, no orbax or
+   cloud-tpu-checkpoint dependency. One `checkpoint_latest.msgpack` plus numbered history
+   per epoch, with a sidecar JSON holding the exact config so `inference.py` can rebuild
+   the model without any hand-passed hyperparameters.
 
 ## Tech stack
 
-- **JAX** — XLA-compiled numerical computing + autodiff
-- **Flax Linen** — Neural network modules
-- **Optax** — AdamW + cosine warmup decay
-- **TensorFlow-datasets** — CIFAR-100 loading (one-shot, then numpy)
-- **matplotlib** — All plots
+- JAX for XLA-compiled numerics and autodiff
+- Flax Linen for the neural-net modules
+- Optax for AdamW with cosine-warmup decay
+- tensorflow-datasets to fetch CIFAR-100 once, then numpy from there
+- matplotlib for every plot
 
 ## License
 

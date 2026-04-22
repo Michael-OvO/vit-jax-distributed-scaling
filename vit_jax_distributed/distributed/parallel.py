@@ -70,12 +70,13 @@ def create_train_step(devices=None):
 def create_train_step_with_straggler(delay_iterations=1000, devices=None):
     """Return a pmap'd training step that injects real compute delay on device 0.
 
-    On device index 0, a ``fori_loop`` executes ``delay_iterations`` nonlinear
-    matrix operations that XLA cannot algebraically elide. Because pmap
+    On device index 0, a ``fori_loop`` runs ``delay_iterations`` nonlinear
+    matrix operations that XLA can't algebraically elide. Because pmap
     synchronises at the all-reduce barrier, device 0's extra work forces every
-    other device to wait — this is the signature of synchronous-SGD's worst case.
+    other device to sit and wait. That's the thing the straggler experiment
+    measures.
 
-    Design choices, all necessary on modern accelerators (v6e, H100):
+    A few choices that are actually necessary on modern accelerators (v6e, H100):
 
     * **Nonlinear body.** ``tanh(a @ a) * 0.99 + 0.01 * a`` — each iteration
       truly depends on the previous, and the nonlinearity blocks the
