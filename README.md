@@ -4,21 +4,15 @@
 
 # ViT-JAX Distributed Scaling
 
-> **Final project — CS 390: Distributed Systems · Duke University · Spring 2026**
-> **Author:** Jinao Wang
+*Jinao Wang · CS 390 (Distributed Systems), Duke University · Spring 2026*
 
 Distributed data-parallel training of a Vision Transformer (ViT-Small) on CIFAR-100 in
 JAX/Flax, with two experiments for scaling analysis and straggler simulation on Google
-Cloud TPUs.
+Cloud TPUs. A systems-focused study: the goal is to understand how distributed training
+actually behaves (sync overhead, throughput scaling, what a slow worker costs), not to
+push accuracy on CIFAR-100.
 
-This is a systems-focused ML project. The point is to understand how distributed training
-actually behaves (sync overhead, throughput scaling, what a slow worker costs you), not to
-push accuracy numbers on CIFAR-100.
-
-> 📄 **Full write-up:** for the complete technical discussion — extended background,
-> per-experiment methodology, ablations, and all figures — see the 30-minute backup deck at
-> [`slides/30min_backup_deck.pdf`](slides/30min_backup_deck.pdf). The README is the short
-> tour; the deck is the long one.
+Full write-up: [2-page report](report/final_report.pdf) · [30-minute extended deck](slides/30min_backup_deck.pdf).
 
 ## Results at a glance
 
@@ -26,12 +20,11 @@ Trained 100 epochs on a single TPU v6e-8 (8 chips, bf16) in **421 seconds**:
 
 | Metric | Value |
 |---|---|
-| Test accuracy (top-1) | **55.04 %** |
-| Test accuracy (top-5) | **80.18 %** |
+| Test accuracy (top-1 / top-5) | **55.04 %** / **80.18 %** |
 | Parameters | 9.55 M |
 | Sustained throughput | ≈ 15 000 imgs / sec |
-| Scaling efficiency, 1 → 8 chips (strong) | 100 % → 36 % |
-| Slowdown from one straggler device (200k-iter delay) | **3.33 ×** |
+| Strong-scaling efficiency, 1 → 8 chips | 100 % → 36 % |
+| Slowdown from one straggler (200 k-iter delay) | **3.33 ×** |
 
 ![Scaling efficiency](outputs/scaling/scaling_efficiency_vs_devices.png)
 ![Straggler slowdown](outputs/straggler/slowdown_vs_delay.png)
@@ -41,47 +34,31 @@ Trained 100 epochs on a single TPU v6e-8 (8 chips, bf16) in **421 seconds**:
 ```
 vit_jax_distributed/
 ├── models/          ViT-Small (Flax Linen)
-├── data/            CIFAR-100 pipeline  (TFDS → numpy)
+├── data/            CIFAR-100 pipeline (TFDS → numpy)
 ├── distributed/     pmap, pmean all-reduce, train-state replication
 ├── train/           Training loop with checkpointing
 ├── experiments/     Scaling + straggler benchmarks
 └── utils/           Config, metrics logger, timers, checkpoint helpers
-main.py              CLI entry for train / scaling / straggler
+main.py              CLI for train / scaling / straggler
 inference.py         Classify one image with a trained checkpoint
-scripts/
-├── setup.sh                    Host-detecting dependency install
-├── run_gcp_tpu.sh              One-shot TPU run (train + scaling + straggler)
-├── run_gcp_gpu.sh              Multi-GPU equivalent
-├── run_local.sh                Laptop smoke run
-├── full_test_eval.py           Full test-set eval → test_predictions.npz
-├── plot_training_curves.py     Train/test loss & accuracy over epochs
-├── plot_eval_results.py        Per-class accuracy bar + confusion matrix
-└── plot_inference_thumbnails.py  Grid of test images with top-3 predictions
-outputs/                      Plots, CSVs, JSON logs from published runs
+scripts/             setup.sh, run_gcp_tpu.sh, plotting helpers
+outputs/             Plots, CSVs, JSON logs from the published run
+report/              2-page formal write-up (.tex + .pdf)
+slides/              5-min presentation + 30-min extended deck (.tex + .pdf)
 ```
 
 ## The model
 
-**ViT-Small** configured for 32×32 CIFAR images:
-- Patch size 4 → 64 patches per image, plus a learnable `[CLS]` token
-- 8 transformer blocks, hidden dim 384, 6 attention heads, MLP dim 768
-- Pre-norm (LayerNorm before attention / MLP) for training stability
-- ~9.5 M trainable parameters
+ViT-Small for 32×32 CIFAR images: patch size 4 (64 patches per image + a `[CLS]` token),
+8 transformer blocks, hidden dim 384, 6 heads, MLP dim 768, pre-norm, ~9.5 M parameters.
 
 ## Distributed training approach
 
-**Synchronous data parallelism** via `jax.pmap`:
-
-1. **Replicate** parameters across all devices.
-2. **Shard** each batch: `(B, H, W, C)` → `(num_devices, B/N, H, W, C)`.
-3. **Compute** gradients independently on each device.
-4. **All-reduce** gradients via `jax.lax.pmean(grads, axis_name='batch')`.
-5. **Update** parameters identically on every device.
-
-The `pmean` call is the synchronisation barrier: every device has to reach it before any
-can proceed. That's the mechanism the straggler experiment pokes at.
-
-### One training step, visualised
+Synchronous data parallelism via `jax.pmap`: replicate parameters, shard the batch,
+compute gradients independently per device, all-reduce with `jax.lax.pmean`, apply an
+identical update on every device. The `pmean` is the synchronisation barrier — every
+device has to reach it before any can proceed, which is exactly the mechanism the
+straggler experiment probes.
 
 ```mermaid
 flowchart LR
@@ -105,69 +82,20 @@ flowchart LR
     class Batch,Shard,Upd,Next normal
 ```
 
-Each device has its own slice of the batch and computes its own local gradient. The
-`pmean` barrier averages those into one shared gradient, and the optimiser update then
-produces identical new parameters on every device. Net effect: distributed training is
-mathematically equivalent to training on one device with the full global batch.
+Net effect: distributed training is mathematically equivalent to training on a single
+device with the full global batch.
 
 ## Experiments
 
-### Scaling — throughput vs device count
-Sweeps `k ∈ {1, 2, 4, 8}` devices (holding the global batch fixed) and measures:
-- step time `T_k`
-- throughput `Θ_k = B / T_k`
-- scaling efficiency `η_k = Θ_k / (k · Θ_1)`
+**Scaling.** Sweeps `k ∈ {1, 2, 4, 8}` devices at fixed global batch 1024, measuring step
+time `T_k`, throughput `Θ_k = B / T_k`, and strong-scaling efficiency `η_k = Θ_k / (k · Θ_1)`.
 
-Plots: `outputs/scaling/throughput_vs_devices.png`,
-`step_time_vs_devices.png`, `scaling_efficiency_vs_devices.png`.
-
-### Straggler — one slow device, whole cluster pays
-Baseline vs. 5 injected compute delays on device 0. The delay is a
-`jax.lax.fori_loop` of real 512 × 512 matmuls, threaded through
-`jax.lax.optimization_barrier` so XLA can't elide it. Reports the slowdown ratio.
-
-That's the whole point of the experiment: device 0 does its extra work while the other
-seven sit idle at the all-reduce barrier, waiting.
-
-```mermaid
-gantt
-    title Straggler step at delay = 200000 (measured: 172.6 ms vs 51.8 ms baseline → 3.33×)
-    dateFormat X
-    axisFormat %L
-    section Device 0 (straggler)
-    forward + backward       :done,    d0a, 0, 52
-    injected matmuls         :crit,    d0b, 52, 173
-    section Device 1
-    forward + backward       :done,    d1a, 0, 52
-    idle — waiting for D0    :active,  d1b, 52, 173
-    section Device 2
-    forward + backward       :done,    d2a, 0, 52
-    idle — waiting for D0    :active,  d2b, 52, 173
-    section Device ⋯
-    forward + backward       :done,    ddd1, 0, 52
-    idle — waiting for D0    :active,  ddd2, 52, 173
-    section Device 7
-    forward + backward       :done,    d7a, 0, 52
-    idle — waiting for D0    :active,  d7b, 52, 173
-```
-
-Plots: `outputs/straggler/step_time_comparison.png`,
-`slowdown_vs_delay.png`.
+**Straggler.** Baseline plus 5 injected compute delays on device 0. The delay is a
+`jax.lax.fori_loop` of nonlinear 512 × 512 matmuls, threaded through
+`jax.lax.optimization_barrier` so XLA can't elide it. Reports the slowdown ratio — the
+other seven devices sit idle at the all-reduce barrier while device 0 does the extra work.
 
 ## Quick start
-
-### Laptop (CPU or single GPU)
-
-```bash
-git clone https://github.com/Michael-OvO/vit-jax-distributed-scaling.git
-cd vit-jax-distributed-scaling
-bash scripts/setup.sh                 # creates a local venv, installs jax[cpu|cuda12]
-
-# Activate the venv (laptop only; TPU path uses pip --user, no venv).
-source venv/bin/activate
-
-python main.py --experiment train --batch_size 128 --epochs 2
-```
 
 ### GCP TPU v6e-8 (what produced the published results)
 
@@ -175,79 +103,49 @@ python main.py --experiment train --batch_size 128 --epochs 2
 gcloud compute tpus tpu-vm create vit-training \
     --zone=us-central1-b --accelerator-type=v6e-8 \
     --version=v2-alpha-tpuv6e --spot
-
 gcloud compute tpus tpu-vm ssh vit-training --zone=us-central1-b
+
 # --- inside the VM ---
 git clone https://github.com/Michael-OvO/vit-jax-distributed-scaling.git
 cd vit-jax-distributed-scaling
-bash scripts/setup.sh                 # installs jax[tpu] from Google's release bucket
-bash scripts/run_gcp_tpu.sh           # runs all three experiments, bf16
+bash scripts/setup.sh                 # installs jax[tpu] once, then requirements
+bash scripts/run_gcp_tpu.sh           # runs train + scaling + straggler, bf16
 
-# --- back on your laptop, when done ---
+# --- back on your laptop ---
 gcloud compute tpus tpu-vm delete vit-training --zone=us-central1-b
 ```
 
-The setup script detects TPU VMs by checking `/dev/accel*` and the `TPU_NAME` env var (no
-JAX required for the probe) and installs `jax[tpu]` exactly once, before
-`pip install -r requirements.txt` has a chance to clobber it with a CPU wheel.
+The setup script detects TPU VMs via `/dev/accel*` and `TPU_NAME` (no JAX needed for the
+probe) and installs `jax[tpu]` before `requirements.txt` can clobber it with a CPU wheel.
 
-### GCP multi-GPU VM
+### Laptop smoke test
 
 ```bash
-gcloud compute ssh YOUR_VM_NAME --zone YOUR_ZONE
 git clone https://github.com/Michael-OvO/vit-jax-distributed-scaling.git
 cd vit-jax-distributed-scaling
-bash scripts/setup.sh                 # installs jax[cuda12]
-bash scripts/run_gcp_gpu.sh
+bash scripts/setup.sh                 # creates venv, installs jax[cpu|cuda12]
+source venv/bin/activate
+python main.py --experiment train --batch_size 128 --epochs 2
 ```
+
+A multi-GPU variant (`scripts/run_gcp_gpu.sh`) is included and works identically with
+`jax[cuda12]`.
 
 ## Running individual experiments
 
 ```bash
-# Training with checkpointing (produces checkpoint_latest.msgpack each epoch)
+# Training
 python main.py --experiment train --batch_size 1024 --epochs 100 \
     --precision bf16 --output_dir outputs/training/100_epoch
 
-# Scaling sweep
-python main.py --experiment scaling --batch_size 1024 \
-    --precision bf16 --output_dir outputs/scaling
-
-# Straggler sweep
-python main.py --experiment straggler --batch_size 1024 \
-    --precision bf16 --output_dir outputs/straggler
+# Scaling / straggler sweeps
+python main.py --experiment scaling   --batch_size 1024 --precision bf16
+python main.py --experiment straggler --batch_size 1024 --precision bf16
 ```
 
-### Inference against a trained checkpoint
-
-```bash
-# Random CIFAR-100 test image (ground-truth known)
-python inference.py --checkpoint outputs/training/100_epoch/checkpoint_latest.msgpack
-
-# Your own image
-python inference.py \
-    --checkpoint outputs/training/100_epoch/checkpoint_latest.msgpack \
-    --image path/to/photo.jpg
-```
-
-### Regenerating plots from saved artefacts
-
-```bash
-# Training curves from epoch_metrics.csv
-python scripts/plot_training_curves.py outputs/training/100_epoch/epoch_metrics.csv
-
-# Full-test eval on a TPU (requires a live VM)
-python scripts/full_test_eval.py \
-    --checkpoint outputs/training/100_epoch/checkpoint_latest.msgpack \
-    --output_dir outputs/training/100_epoch
-
-# Per-class accuracy + confusion matrix (works offline)
-python scripts/plot_eval_results.py outputs/training/100_epoch/test_predictions.npz
-
-# Inference thumbnails, fully offline (uses the raw CIFAR NPZ)
-python scripts/plot_inference_thumbnails.py \
-    outputs/training/100_epoch/test_predictions.npz \
-    --images_npz outputs/cifar100_test_raw.npz
-```
+Inference against a checkpoint: `python inference.py --checkpoint <path>` (optionally
+`--image path/to/photo.jpg`). Plotting helpers live in `scripts/` and regenerate every
+figure offline from the saved CSVs/NPZs.
 
 ## Key CLI flags
 
@@ -260,167 +158,62 @@ python scripts/plot_inference_thumbnails.py \
 | `--precision` | `fp32` | `fp32` or `bf16` (TPU-native matmul) |
 | `--learning_rate` | `1e-3` | Peak LR with cosine warmup schedule |
 | `--output_dir` | `./outputs` | Where to save logs, plots, and checkpoints |
-| `--log_every` | `50` | Steps between log entries |
-| `--eval_every` | `1` | Epochs between test-set evaluation |
 
 See [`configs/default.yaml`](configs/default.yaml) for the full list.
 
-## Outputs
-
-### Per training run
-- `step_metrics.csv` — per-step loss, accuracy, timing
-- `epoch_metrics.csv` — per-epoch train/test metrics
-- `training_log.json` — config + metadata + all logs
-- `checkpoint_NNNNNN.msgpack` + `checkpoint_latest.msgpack` — model state
-- `checkpoint_latest.json` — step, epoch, and full config for the latest checkpoint
-
-### Per experiment
-- Scaling: `scaling_results.csv/json` + three PNGs (throughput, step time, efficiency)
-- Straggler: `straggler_results.csv/json` + two PNGs (bar chart, log-x slowdown curve)
-
-All published artefacts from the TPU v6e-8 run live under [`outputs/`](outputs/):
-
-```
-outputs/
-├── cifar100_test_raw.npz       # 30 MB, uint8 test images for offline thumbnails
-├── scaling/                    # three PNGs + CSV
-├── straggler/                  # two PNGs + CSV
-└── training/
-    ├── 20_epoch/               # baseline run
-    └── 100_epoch/              # headline run + eval artefacts
-        ├── training_curves.png
-        ├── per_class_accuracy.png
-        ├── confusion_matrix.png
-        ├── inference_thumbnails.png
-        ├── inference_samples.txt
-        ├── test_predictions.npz
-        └── test_summary.json
-```
-
 ## What the numbers say
 
-**Strong scaling drops to 36 %** at 8 chips. Per-device batch halves on every doubling,
-so the MXU gets starved of work and all-reduce starts to dominate step time. Weak scaling
-(fixed per-device batch) would stay > 85 % here.
-
-**A single straggler device (200 k extra matmul iters) slows the entire 8-chip cluster
-by 3.33×**, dropping throughput from 19 800 img/s to 5 900 img/s. That's the cost of one
-bad chip in an otherwise-healthy cluster, and it's the classic argument for async SGD,
-backup workers, and elastic training.
-
-**The model overfits after epoch ~33.** Training loss keeps falling (down to 0.03 at
-epoch 100, i.e. 99 % train accuracy), but test loss bottoms out at epoch 32 (1.93) and
-climbs back to 2.72 by the end. Test accuracy still creeps upward to 55 % — the model
-just keeps getting more confident about the examples it was already getting right. See
-`outputs/training/100_epoch/training_curves.png`.
-
-**The model learned categories, not fine labels.** The top 5 most-common confusions are
-`maple_tree → oak_tree` (19×), `pine_tree → oak_tree` (17×), `oak_tree → maple_tree`
-(16×), `man → woman` (16×), `bus → pickup_truck` (14×). See the confusion matrix.
+Strong scaling drops to 36 % at 8 chips because per-device batch halves on every
+doubling — the MXU gets starved and the all-reduce dominates. Weak scaling would stay
+above 85 %. A single straggler device at 200 k iterations slows the whole cluster by
+3.33× (19 800 → 5 900 img/s) — the textbook argument for async SGD, backup workers, and
+elastic training. The model overfits after epoch ~33 (test loss bottoms at 1.93, climbs
+back to 2.72) and confuses related categories rather than random ones: the top confusions
+are `maple_tree ↔ oak_tree`, `pine_tree → oak_tree`, `man → woman`, `bus → pickup_truck`.
+It learned categories, not fine labels.
 
 ## Classification examples
 
-### Sample predictions on the test set
-
 ![Inference thumbnails](outputs/training/100_epoch/inference_thumbnails.png)
 
-24 random test images with the model's top-3 predictions under each tile. Green border
-means the top-1 was correct, red means it wasn't. I mixed it roughly half-and-half on
-purpose, so you can see both the wins and the failure modes in one figure.
-
-### Text transcript of five sample classifications
-
-Three are illustrative; the full five are in
-[`outputs/training/100_epoch/inference_samples.txt`](outputs/training/100_epoch/inference_samples.txt).
-
-```text
-Seed 0 — true class: tiger
-  1. tiger              p = 0.959  ← ✓ CORRECT, high confidence
-  2. squirrel           p = 0.021
-  3. cup                p = 0.009
-  4. wolf               p = 0.003
-  5. crocodile          p = 0.002
-
-Seed 3 — true class: bus
-  1. porcupine          p = 0.400
-  2. turtle             p = 0.261
-  3. pickup_truck       p = 0.099  ← fine class wrong, but "vehicle" is in top-3
-  4. tank               p = 0.071
-  5. oak_tree           p = 0.063
-
-Seed 1 — true class: spider
-  1. trout              p = 0.505
-  2. boy                p = 0.162
-  3. wolf               p = 0.125
-  4. girl               p = 0.087
-  5. spider             p = 0.044  ← true class barely in top-5
-```
-
-The tiger is the easy, confident case. The bus is what "learned categories, not fine
-labels" looks like in practice: the top-1 is wildly wrong, but `pickup_truck` and `tank`
-are both vehicles and both show up in the top-5. The spider is a genuine hallucination —
-the kind of failure that caps what you can get out of 32×32 thumbnails from scratch.
-
-### Per-class accuracy
-
-![Per-class accuracy](outputs/training/100_epoch/per_class_accuracy.png)
-
-All 100 CIFAR-100 fine classes ranked by test accuracy. The colour gradient from red to
-green tracks accuracy; the dashed line marks the 55.04 % overall mean.
-
-**Best** (distinct colours / shapes): `sunflower` 85 %, `skunk` 84 %, `orange` 84 %,
-`road` 84 %, `plain` 84 %.
-**Worst** (visually ambiguous fine categories): `seal` 24 %, `lizard` 30 %, `otter` 31 %,
-`man` 31 %, `turtle` 33 %.
-
-### Confusion matrix
-
-![Confusion matrix](outputs/training/100_epoch/confusion_matrix.png)
-
-Rows sum to 1 (probability of a predicted class given a true class). A perfect model
-would be a pure diagonal; ours is diagonal-heavy but with bright off-diagonal clusters
-exactly where related categories live. The three tree classes form a little cross in the
-bottom-right corner, for example.
+24 random test images with the model's top-3 predictions under each tile. Green borders
+mark correct top-1 predictions, red marks wrong ones; mixed roughly half-and-half on
+purpose. Per-class accuracy and the full confusion matrix are in
+[`outputs/training/100_epoch/`](outputs/training/100_epoch/), and five text-format
+examples are in [`inference_samples.txt`](outputs/training/100_epoch/inference_samples.txt).
 
 ## Design decisions
 
-1. **`pmap`, not `pjit`/`shard_map`.** For pure data parallelism, `pmap` is simpler and
-   more explicit. `pjit` is the right tool for *tensor* or *pipeline* parallelism, neither
-   of which a 9.5 M-param model fitting in a single chip's HBM needs.
+1. **`pmap`, not `pjit`/`shard_map`.** Pure data parallelism is simpler and more explicit
+   under `pmap`. A 9.5 M-param model fits in a single chip's HBM, so tensor/pipeline
+   parallelism isn't needed.
 
-2. **Numpy-only data pipeline.** After the initial TFDS load, augmentation and batching
-   are in-memory numpy operations. The full CIFAR-100 float32 train set is ~615 MB, which
-   fits comfortably in RAM and sidesteps the `tf.data` runtime overhead.
+2. **Numpy-only data pipeline.** The full float32 train set is ~615 MB and lives in RAM
+   after one TFDS load, so augmentation and batching sidestep `tf.data`'s runtime overhead.
 
-3. **Straggler via real XLA compute, not `time.sleep`.** `time.sleep` is a Python call;
-   it doesn't run inside a pmap'd JIT program, and even if it did, a smart scheduler
-   could hide it. So I inject a `jax.lax.fori_loop` of nonlinear 512×512 matmuls and
-   thread the result through `jax.lax.optimization_barrier`, which stops XLA's algebraic
-   simplifier and DCE from optimising the loop away. My first attempt used
-   `a @ eye(64) + 0*a` and got folded to the identity; the commit history has the fix.
+3. **Straggler via real XLA compute, not `time.sleep`.** The delay is a
+   `jax.lax.fori_loop` of nonlinear 512×512 matmuls, threaded through
+   `jax.lax.optimization_barrier` so XLA's algebraic simplifier and DCE can't elide it.
+   An earlier attempt with `a @ eye(64) + 0*a` folded to the identity and silently
+   zeroed the effect; the commit history has the fix.
 
 4. **Device subsets threaded through `pmap`.** Every `pmap`, `eval_step`, and
-   `jax_utils.replicate` call in this repo takes an explicit `devices=` list. Skip it
-   and the scaling experiment breaks on multi-device hosts: `pmap` silently binds to
-   all local devices and the sharded batch's leading dimension no longer matches.
+   `jax_utils.replicate` call takes an explicit `devices=` list. Skip it and `pmap`
+   silently binds to all local devices, so the sharded leading dim stops matching.
 
 5. **bf16 without parameter dtype changes.** `--precision bf16` flips
-   `jax_default_matmul_precision` to `bfloat16` globally. fp32 parameters and optimizer
-   state are preserved; only matmuls (Dense, attention QKV, einsum) downcast on the MXU.
-   Cheap and safe on v3/v6e TPUs, and worth roughly a 2× step-time win.
+   `jax_default_matmul_precision` globally; parameters and optimiser state stay fp32.
+   Matmuls downcast on the MXU — cheap, safe on v3/v6e, ~2× step-time win.
 
 6. **Checkpointing via `flax.serialization`.** msgpack format, no orbax or
-   cloud-tpu-checkpoint dependency. One `checkpoint_latest.msgpack` plus numbered history
+   cloud-tpu-checkpoint dependency. One `checkpoint_latest.msgpack` + numbered history
    per epoch, with a sidecar JSON holding the exact config so `inference.py` can rebuild
-   the model without any hand-passed hyperparameters.
+   the model without hand-passed hyperparameters.
 
 ## Tech stack
 
-- JAX for XLA-compiled numerics and autodiff
-- Flax Linen for the neural-net modules
-- Optax for AdamW with cosine-warmup decay
-- tensorflow-datasets to fetch CIFAR-100 once, then numpy from there
-- matplotlib for every plot
+JAX (XLA-compiled numerics + autodiff), Flax Linen (modules), Optax (AdamW + cosine
+warmup decay), tensorflow-datasets (one-shot CIFAR-100 load), matplotlib (plots).
 
 ## License
 
